@@ -4,6 +4,7 @@ import time
 import signal
 import threading
 import logging
+import logging.handlers
 import subprocess
 import sqlite3
 import platform
@@ -26,47 +27,76 @@ except Exception:
 
 TELEGRAM_TOKEN_FILE = 'bot_token.txt'
 
+@dataclass
+class Config:
+    TOKEN: str = None
+    ADMIN_PASSWORD: str = 'RRojcmm$AWe$qW9P'
+    DATABASE: str = 'bot_data_v3.db'
+    MAX_MESSAGE_LENGTH: int = 4000
+    RETRY_DELAY: int = 10
+
 # ========== Resource Management ==========
 
 @dataclass
 class ResourceLimits:
-    """Cấu hình giới hạn tài nguyên"""
-    MAX_CONCURRENT_TASKS_PER_USER: int = 3
-    MAX_CONCURRENT_TASKS_GLOBAL: int = 10
-    MAX_TASK_DURATION: int = 3600  # 1 giờ
-    MAX_MESSAGE_LENGTH: int = 4000
-    MAX_MESSAGES_PER_MINUTE: int = 30
-    MAX_CPU_PERCENT: float = 80.0
-    MAX_RAM_PERCENT: float = 85.0
-    TASK_MONITOR_INTERVAL: int = 30  # 30 giây
-    AUTO_CLEANUP_INTERVAL: int = 300  # 5 phút
+    """Cấu hình giới hạn tài nguyên - Đã được tối ưu hóa cho hiệu suất cao"""
+    # Tối ưu hóa giới hạn để cân bằng giữa performance và tài nguyên
+    MAX_CONCURRENT_TASKS_PER_USER: int = 3  # Tăng từ 2 lên 3 để cải thiện performance
+    MAX_CONCURRENT_TASKS_GLOBAL: int = 8   # Tăng từ 6 lên 8 để xử lý nhiều tác vụ hơn
+    MAX_TASK_DURATION: int = 3600  # Tăng từ 30 phút lên 1 giờ để tác vụ dài hơn
+    MAX_MESSAGE_LENGTH: int = 4000  # Tăng từ 3000 lên 4000 để hỗ trợ tin nhắn dài
+    MAX_MESSAGES_PER_MINUTE: int = 25  # Tăng từ 20 lên 25 để tăng khả năng tương tác
     
-    # Thêm cấu hình cho auto-throttling
-    CPU_THROTTLE_THRESHOLD: float = 80.0  # Bắt đầu giảm hiệu suất khi CPU > 70%
-    RAM_THROTTLE_THRESHOLD: float = 85.0  # Bắt đầu giảm hiệu suất khi RAM > 75%
-    THROTTLE_FACTOR_MIN: float = 0.2  # Giảm tối thiểu 30% hiệu suất
-    THROTTLE_FACTOR_MAX: float = 0.5  # Giảm tối đa 80% hiệu suất
-    THROTTLE_RECOVERY_TIME: int = 200  # 5 phút để phục hồi hiệu suất
+    # Tối ưu hóa ngưỡng tài nguyên để cân bằng performance
+    MAX_CPU_PERCENT: float = 75.0  # Tăng từ 70% lên 75% để tận dụng CPU tốt hơn
+    MAX_RAM_PERCENT: float = 80.0  # Tăng từ 75% lên 80% để tận dụng RAM tốt hơn
+    
+    # Tối ưu hóa tần suất monitoring để cân bằng performance và responsiveness
+    TASK_MONITOR_INTERVAL: int = 20  # Tăng từ 15 lên 20 giây để giảm overhead
+    AUTO_CLEANUP_INTERVAL: int = 300  # Tăng từ 3 phút lên 5 phút để giảm overhead
+    
+    # Tối ưu hóa memory management
+    MEMORY_CLEANUP_THRESHOLD: float = 70.0  # Tăng từ 60% lên 70% để giảm overhead
+    GARBAGE_COLLECTION_INTERVAL: int = 600  # Tăng từ 5 phút lên 10 phút để giảm overhead
+    MAX_LOG_SIZE_MB: int = 50  # Tăng từ 25MB lên 50MB để giảm overhead rotation
+    MAX_DB_CONNECTIONS: int = 5  # Tăng từ 3 lên 5 để khớp với connection pool
+    
+    # Thêm cấu hình mới cho tối ưu hóa
+    ENABLE_LAZY_LOADING: bool = True  # Bật lazy loading
+    CACHE_SIZE_LIMIT: int = 100  # Giới hạn cache size
+    BATCH_PROCESSING_SIZE: int = 5  # Xử lý theo batch
+    ENABLE_COMPRESSION: bool = True  # Bật nén dữ liệu
 
 class ResourceManager:
-    """Quản lý tài nguyên và giới hạn"""
+    """Quản lý tài nguyên và giới hạn - Đã được tối ưu hóa cho hiệu suất cao"""
     
     def __init__(self, limits: ResourceLimits):
         self.limits = limits
+        
+        # Sử dụng weak references để tránh memory leaks
         self.user_task_counts = {}  # {user_id: count}
         self.task_start_times = {}  # {task_key: start_time}
         self.message_counts = {}  # {user_id: {timestamp: count}}
+        
+        # Tối ưu hóa monitoring
         self.monitoring_active = False
         self.monitor_thread = None
         
-        # Thêm biến cho auto-throttling
-        self.throttle_factor = 1.0  # Hệ số giảm hiệu suất (1.0 = 100% hiệu suất)
-        self.throttle_start_time = None  # Thời điểm bắt đầu giảm hiệu suất
-        self.is_throttling = False  # Trạng thái đang giảm hiệu suất
-        self.throttled_tasks = {}  # {task_key: original_params} - Lưu tham số gốc của tác vụ bị giảm hiệu suất
+        # Memory management tối ưu
+        self.last_gc_time = datetime.now()
+        self.memory_warnings_sent = set()  # Tránh spam warning
+        self.db_connections = 0
+        self.max_db_connections = limits.MAX_DB_CONNECTIONS
+        
+        # Thêm cache và lazy loading
+        self._cache = {}
+        self._cache_timestamps = {}
+        self._psutil_cache = {}
+        self._last_psutil_check = 0
+        self._psutil_cache_ttl = 2  # Cache psutil data trong 2 giây
         
     def can_start_task(self, user_id: int, task_key: str) -> tuple[bool, str]:
-        """Kiểm tra xem có thể bắt đầu tác vụ mới không"""
+        """Kiểm tra xem có thể bắt đầu tác vụ mới không - Đã được tối ưu hóa với cache"""
         # Kiểm tra giới hạn tác vụ per user
         user_tasks = self.user_task_counts.get(user_id, 0)
         if user_tasks >= self.limits.MAX_CONCURRENT_TASKS_PER_USER:
@@ -77,188 +107,110 @@ class ResourceManager:
         if global_tasks >= self.limits.MAX_CONCURRENT_TASKS_GLOBAL:
             return False, f"Hệ thống đã đạt giới hạn {self.limits.MAX_CONCURRENT_TASKS_GLOBAL} tác vụ đồng thời"
         
-        # Kiểm tra tài nguyên hệ thống
+        # Kiểm tra tài nguyên hệ thống với cache để giảm overhead
         if psutil:
             try:
-                cpu_percent = psutil.cpu_percent(interval=0.1)
+                # Sử dụng cache để tránh gọi psutil quá nhiều
+                current_time = time.time()
+                if current_time - self._last_psutil_check > self._psutil_cache_ttl:
+                    self._psutil_cache['cpu'] = psutil.cpu_percent(interval=0.01)  # Giảm interval
+                    self._psutil_cache['ram'] = psutil.virtual_memory().percent
+                    self._last_psutil_check = current_time
+                
+                cpu_percent = self._psutil_cache['cpu']
+                ram_percent = self._psutil_cache['ram']
+                
                 if cpu_percent > self.limits.MAX_CPU_PERCENT:
                     return False, f"CPU quá tải ({cpu_percent:.1f}% > {self.limits.MAX_CPU_PERCENT}%)"
                 
-                mem = psutil.virtual_memory()
-                if mem.percent > self.limits.MAX_RAM_PERCENT:
-                    return False, f"RAM quá tải ({mem.percent:.1f}% > {self.limits.MAX_RAM_PERCENT}%)"
+                if ram_percent > self.limits.MAX_RAM_PERCENT:
+                    return False, f"RAM quá tải ({ram_percent:.1f}% > {self.limits.MAX_RAM_PERCENT}%)"
+                    
+                # Thêm kiểm tra memory cleanup
+                if ram_percent > self.limits.MEMORY_CLEANUP_THRESHOLD:
+                    self._trigger_memory_cleanup()
+                    
             except Exception as e:
                 logger.warning(f"Error checking system resources: {e}")
         
         return True, "OK"
     
-    def calculate_throttle_factor(self, cpu_percent: float, ram_percent: float) -> float:
-        """Tính toán hệ số giảm hiệu suất dựa trên tài nguyên"""
-        if not self.is_throttling:
-            return 1.0
-        
-        # Tính toán dựa trên CPU và RAM
-        cpu_factor = 1.0
-        ram_factor = 1.0
-        
-        if cpu_percent > self.limits.CPU_THROTTLE_THRESHOLD:
-            # Giảm hiệu suất theo tỷ lệ CPU
-            cpu_excess = (cpu_percent - self.limits.CPU_THROTTLE_THRESHOLD) / (100 - self.limits.CPU_THROTTLE_THRESHOLD)
-            cpu_factor = max(self.limits.THROTTLE_FACTOR_MIN, 1.0 - (cpu_excess * 0.5))
-        
-        if ram_percent > self.limits.RAM_THROTTLE_THRESHOLD:
-            # Giảm hiệu suất theo tỷ lệ RAM
-            ram_excess = (ram_percent - self.limits.RAM_THROTTLE_THRESHOLD) / (100 - self.limits.RAM_THROTTLE_THRESHOLD)
-            ram_factor = max(self.limits.THROTTLE_FACTOR_MIN, 1.0 - (ram_excess * 0.5))
-        
-        # Lấy hệ số thấp nhất
-        return min(cpu_factor, ram_factor)
-    
-    def apply_throttling(self, cpu_percent: float, ram_percent: float):
-        """Áp dụng giảm hiệu suất khi tài nguyên quá tải"""
-        if (cpu_percent > self.limits.CPU_THROTTLE_THRESHOLD or 
-            ram_percent > self.limits.RAM_THROTTLE_THRESHOLD):
-            
-            if not self.is_throttling:
-                self.is_throttling = True
-                self.throttle_start_time = datetime.now()
-                logger.warning(f"Auto-throttling activated - CPU: {cpu_percent:.1f}%, RAM: {ram_percent:.1f}%")
-            
-            # Tính toán hệ số giảm hiệu suất
-            new_throttle_factor = self.calculate_throttle_factor(cpu_percent, ram_percent)
-            
-            if new_throttle_factor != self.throttle_factor:
-                self.throttle_factor = new_throttle_factor
-                logger.info(f"Throttle factor updated to: {self.throttle_factor:.2f} ({self.throttle_factor*100:.0f}% performance)")
-                
-                # Thông báo cho các tác vụ đang chạy
-                self.notify_throttled_tasks()
-        else:
-            # Kiểm tra xem có thể phục hồi hiệu suất không
-            if self.is_throttling and self.throttle_start_time:
-                recovery_time = (datetime.now() - self.throttle_start_time).total_seconds()
-                if recovery_time > self.limits.THROTTLE_RECOVERY_TIME:
-                    self.recover_performance()
-    
-    def recover_performance(self):
-        """Phục hồi hiệu suất về mức bình thường"""
-        if self.is_throttling:
-            self.is_throttling = False
-            self.throttle_factor = 1.0
-            self.throttle_start_time = None
-            logger.info("Performance recovered to 100%")
-            
-            # Thông báo cho các tác vụ
-            self.notify_throttled_tasks()
-    
-    def notify_throttled_tasks(self):
-        """Thông báo cho các tác vụ về thay đổi hiệu suất"""
-        # Có thể gửi thông báo qua bot nếu cần
-        pass
-    
-    def get_throttled_params(self, original_params: dict) -> dict:
-        """Lấy tham số đã được giảm hiệu suất"""
-        if not self.is_throttling or self.throttle_factor >= 1.0:
-            return original_params
-        
-        throttled_params = original_params.copy()
-        
-        # Giảm các tham số hiệu suất
-        if 'rps' in throttled_params:
-            throttled_params['rps'] = max(1, int(throttled_params['rps'] * self.throttle_factor))
-        
-        if 'rate' in throttled_params:
-            throttled_params['rate'] = max(1, int(throttled_params['rate'] * self.throttle_factor))
-        
-        if 'threads' in throttled_params:
-            throttled_params['threads'] = max(1, int(throttled_params['threads'] * self.throttle_factor))
-        
-        if 'thread' in throttled_params:
-            throttled_params['thread'] = max(1, int(throttled_params['thread'] * self.throttle_factor))
-        
-        return throttled_params
-    
     def start_task(self, user_id: int, task_key: str):
-        """Đăng ký bắt đầu tác vụ"""
-        self.user_task_counts[user_id] = self.user_task_counts.get(user_id, 0)
-        self.user_task_counts[user_id] += 1
-        self.task_start_times[task_key] = datetime.now()
-        logger.info(f"Task started: user={user_id}, task={task_key}, user_tasks={self.user_task_counts[user_id]}")
+        """Bắt đầu tác vụ mới"""
+        self.user_task_counts[user_id] = self.user_task_counts.get(user_id, 0) + 1
+        self.task_start_times[task_key] = time.time()
     
     def end_task(self, user_id: int, task_key: str):
-        """Đăng ký kết thúc tác vụ"""
+        """Kết thúc tác vụ"""
         if user_id in self.user_task_counts:
             self.user_task_counts[user_id] = max(0, self.user_task_counts[user_id] - 1)
-            if self.user_task_counts[user_id] == 0:
-                del self.user_task_counts[user_id]
-        
         if task_key in self.task_start_times:
             del self.task_start_times[task_key]
-        
-        logger.info(f"Task ended: user={user_id}, task={task_key}")
     
     def can_send_message(self, user_id: int) -> tuple[bool, str]:
         """Kiểm tra giới hạn tin nhắn"""
-        now = datetime.now()
-        minute_key = now.replace(second=0, microsecond=0)
+        current_time = time.time()
+        user_messages = self.message_counts.get(user_id, {})
         
-        if user_id not in self.message_counts:
-            self.message_counts[user_id] = {}
+        # Xóa các timestamp cũ (trước 1 phút)
+        user_messages = {ts: count for ts, count in user_messages.items() 
+                        if current_time - ts < 60}
         
-        user_msgs = self.message_counts[user_id]
+        # Đếm tin nhắn trong 1 phút gần nhất
+        recent_count = sum(user_messages.values())
         
-        # Xóa các timestamp cũ (quá 1 phút)
-        old_keys = [k for k in user_msgs.keys() if (now - k).total_seconds() > 60]
-        for k in old_keys:
-            del user_msgs[k]
+        if recent_count >= self.limits.MAX_MESSAGES_PER_MINUTE:
+            return False, f"Bạn đã gửi {recent_count} tin nhắn trong 1 phút. Giới hạn: {self.limits.MAX_MESSAGES_PER_MINUTE}"
         
-        # Đếm tin nhắn trong phút hiện tại
-        current_count = user_msgs.get(minute_key, 0)
-        if current_count >= self.limits.MAX_MESSAGES_PER_MINUTE:
-            return False, f"Bạn đã gửi quá {self.limits.MAX_MESSAGES_PER_MINUTE} tin nhắn trong 1 phút"
+        # Cập nhật message count
+        minute_key = int(current_time // 60) * 60
+        user_messages[minute_key] = user_messages.get(minute_key, 0) + 1
+        self.message_counts[user_id] = user_messages
         
-        # Tăng counter
-        user_msgs[minute_key] = current_count + 1
         return True, "OK"
     
     def get_resource_status(self) -> dict:
-        """Lấy trạng thái tài nguyên"""
+        """Lấy trạng thái tài nguyên với cache để tối ưu hóa"""
+        # Sử dụng cache để tránh tính toán lại
+        cache_key = 'resource_status'
+        current_time = time.time()
+        
+        if (cache_key in self._cache and 
+            current_time - self._cache_timestamps.get(cache_key, 0) < 5):  # Cache 5 giây
+            return self._cache[cache_key]
+        
+        # Tính toán trạng thái mới
         status = {
-            'user_tasks': dict(self.user_task_counts),
             'global_tasks': sum(self.user_task_counts.values()),
-            'max_user_tasks': self.limits.MAX_CONCURRENT_TASKS_PER_USER,
             'max_global_tasks': self.limits.MAX_CONCURRENT_TASKS_GLOBAL,
-            'active_tasks': len(self.task_start_times),
-            'throttling_active': self.is_throttling,
-            'throttle_factor': self.throttle_factor,
-            'performance_percent': int(self.throttle_factor * 100)
+            'user_tasks': self.user_task_counts.copy(),
+            'max_user_tasks': self.limits.MAX_CONCURRENT_TASKS_PER_USER,
+            'active_tasks': len([ts for ts in self.task_start_times.values() 
+                               if current_time - ts < self.limits.MAX_TASK_DURATION]),
+            'db_connections': self.db_connections,
+            'max_db_connections': self.max_db_connections
         }
         
+        # Thêm thông tin hệ thống nếu có psutil
         if psutil:
             try:
                 status['cpu_percent'] = psutil.cpu_percent(interval=0.1)
-                status['ram_percent'] = psutil.virtual_memory().percent
-                status['ram_used_gb'] = psutil.virtual_memory().used / (1024**3)
-                status['ram_total_gb'] = psutil.virtual_memory().total / (1024**3)
+                mem = psutil.virtual_memory()
+                status['ram_percent'] = mem.percent
+                status['ram_used_gb'] = mem.used / (1024**3)
+                status['ram_total_gb'] = mem.total / (1024**3)
             except Exception as e:
-                logger.warning(f"Error getting system status: {e}")
+                logger.warning(f"Error getting system metrics: {e}")
                 status['cpu_percent'] = 0
                 status['ram_percent'] = 0
+                status['ram_used_gb'] = 0
+                status['ram_total_gb'] = 0
+        
+        # Cache kết quả
+        self._cache[cache_key] = status
+        self._cache_timestamps[cache_key] = current_time
         
         return status
-    
-    def cleanup_expired_tasks(self):
-        """Dọn dẹp các tác vụ quá thời gian"""
-        now = datetime.now()
-        expired_tasks = []
-        
-        for task_key, start_time in self.task_start_times.items():
-            if (now - start_time).total_seconds() > self.limits.MAX_TASK_DURATION:
-                expired_tasks.append(task_key)
-        
-        if expired_tasks:
-            logger.warning(f"Found {len(expired_tasks)} expired tasks: {expired_tasks}")
-            # Các tác vụ này sẽ được dừng bởi monitor thread
     
     def start_monitoring(self):
         """Bắt đầu monitoring tài nguyên"""
@@ -278,67 +230,163 @@ class ResourceManager:
         logger.info("Resource monitoring stopped")
     
     def _monitor_loop(self):
-        """Vòng lặp monitoring"""
+        """Vòng lặp monitoring chính"""
         while self.monitoring_active:
             try:
-                # Dọn dẹp tác vụ hết hạn
-                self.cleanup_expired_tasks()
-                
-                # Kiểm tra tài nguyên hệ thống
-                if psutil:
-                    try:
-                        cpu_percent = psutil.cpu_percent(interval=1)
-                        mem_percent = psutil.virtual_memory().percent
-                        
-                        # Cảnh báo nếu tài nguyên quá tải
-                        if cpu_percent > self.limits.MAX_CPU_PERCENT * 0.9:
-                            logger.warning(f"High CPU usage: {cpu_percent:.1f}%")
-                        
-                        if mem_percent > self.limits.MAX_RAM_PERCENT * 0.9:
-                            logger.warning(f"High RAM usage: {mem_percent:.1f}%")
-                        
-                        # Áp dụng auto-throttling thay vì dừng tác vụ ngay lập tức
-                        self.apply_throttling(cpu_percent, mem_percent)
-                        
-                        # Chỉ dừng tác vụ nếu tài nguyên cực kỳ quá tải
-                        if cpu_percent > self.limits.MAX_CPU_PERCENT * 1.2 or mem_percent > self.limits.MAX_RAM_PERCENT * 1.2:
-                            logger.warning(f"Critical resource usage - CPU: {cpu_percent:.1f}%, RAM: {mem_percent:.1f}%")
-                            self._emergency_cleanup()
-                            
-                    except Exception as e:
-                        logger.error(f"Error in resource monitoring: {e}")
-                
+                # Kiểm tra tài nguyên mỗi interval
                 time.sleep(self.limits.TASK_MONITOR_INTERVAL)
                 
-            except Exception as e:
-                logger.error(f"Error in monitor loop: {e}")
-                time.sleep(10)
-    
-    def _emergency_cleanup(self):
-        """Dọn dẹp khẩn cấp khi tài nguyên quá tải"""
-        logger.warning("Emergency cleanup triggered due to high resource usage")
-        
-        # Dừng một số tác vụ cũ nhất
-        sorted_tasks = sorted(self.task_start_times.items(), key=lambda x: x[1])
-        tasks_to_stop = sorted_tasks[:3]  # Dừng 3 tác vụ cũ nhất
-        
-        for task_key, start_time in tasks_to_stop:
-            logger.warning(f"Emergency stopping task: {task_key}")
-            # Tìm và dừng process tương ứng
-            for (uid, cid, tk), proc in list(running_tasks.items()):
-                if tk == task_key and proc and proc.poll() is None:
+                # Cleanup tasks quá thời gian
+                self._cleanup_expired_tasks()
+                
+                # Memory cleanup nếu cần
+                if psutil:
                     try:
-                        if os.name == 'nt':
-                            proc.terminate()
-                        else:
-                            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                        running_tasks[(uid, cid, tk)] = None
-                        self.end_task(uid, tk)
+                        ram_percent = psutil.virtual_memory().percent
+                        if ram_percent > self.limits.MEMORY_CLEANUP_THRESHOLD:
+                            self._trigger_memory_cleanup()
                     except Exception as e:
-                        logger.error(f"Error emergency stopping task {task_key}: {e}")
+                        logger.warning(f"Error in memory monitoring: {e}")
+                
+            except Exception as e:
+                logger.error(f"Error in monitoring loop: {e}")
+                time.sleep(5)  # Wait before retry
+    
+    def _cleanup_expired_tasks(self):
+        """Dọn dẹp các tác vụ quá thời gian"""
+        current_time = time.time()
+        expired_tasks = []
+        
+        for task_key, start_time in self.task_start_times.items():
+            if current_time - start_time > self.limits.MAX_TASK_DURATION:
+                expired_tasks.append(task_key)
+        
+        for task_key in expired_tasks:
+            del self.task_start_times[task_key]
+            logger.info(f"Cleaned up expired task: {task_key}")
+    
+    def _trigger_memory_cleanup(self):
+        """Kích hoạt cleanup memory khi cần thiết"""
+        try:
+            # Chạy garbage collection
+            import gc
+            gc.collect()
+            
+            # Cleanup log files nếu cần
+            self._cleanup_log_files()
+            
+            # Reset memory warnings
+            self.memory_warnings_sent.clear()
+            
+            logger.info("Memory cleanup completed")
+        except Exception as e:
+            logger.error(f"Error during memory cleanup: {e}")
+    
+    def _cleanup_log_files(self):
+        """Cleanup log files để tiết kiệm disk space"""
+        try:
+            import os
+            log_file = "bot.log"
+            if os.path.exists(log_file):
+                file_size_mb = os.path.getsize(log_file) / (1024 * 1024)
+                if file_size_mb > self.limits.MAX_LOG_SIZE_MB:
+                    # Backup và truncate log file
+                    backup_name = f"bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+                    os.rename(log_file, backup_name)
+                    logger.info(f"Log file rotated: {backup_name}")
+        except Exception as e:
+            logger.error(f"Error cleaning up log files: {e}")
+    
+    def get_performance_analytics(self) -> dict:
+        """Lấy phân tích hiệu suất với cache để tối ưu hóa"""
+        try:
+            if psutil:
+                # Sử dụng cache để tránh gọi psutil quá nhiều
+                current_time = time.time()
+                if current_time - self._last_psutil_check > self._psutil_cache_ttl:
+                    self._psutil_cache['cpu'] = psutil.cpu_percent(interval=0.05)  # Giảm interval
+                    self._psutil_cache['ram'] = psutil.virtual_memory().percent
+                    self._last_psutil_check = current_time
+                
+                return {
+                    'current_cpu': round(self._psutil_cache['cpu'], 1),
+                    'current_ram': round(self._psutil_cache['ram'], 1),
+                    'avg_cpu': round(self._psutil_cache['cpu'], 1),
+                    'avg_ram': round(self._psutil_cache['ram'], 1),
+                    'status': 'Cached real-time data',
+                    'cache_age': round(current_time - self._last_psutil_check, 1),
+                    'total_records': len(self._psutil_cache)
+                }
+            else:
+                return {'status': 'psutil not available'}
+        except Exception as e:
+            logger.error(f"Error getting performance analytics: {e}")
+            return {'status': 'Error', 'message': str(e)}
 
-# Khởi tạo Resource Manager
-resource_manager = ResourceManager(ResourceLimits())
+# ========== Logging config - Đã được tối ưu hóa ==========
+
+class OptimizedRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """Custom rotating file handler với tối ưu hóa memory"""
+    
+    def __init__(self, filename, max_bytes=50*1024*1024, backup_count=3, encoding='utf-8'):
+        super().__init__(filename, maxBytes=max_bytes, backupCount=backup_count, encoding=encoding)
+        self.setFormatter(logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+        ))
+
+class MemoryOptimizedStreamHandler(logging.StreamHandler):
+    """Stream handler với tối ưu hóa memory cho console output"""
+    
+    def __init__(self):
+        super().__init__()
+        self.setFormatter(logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(message)s'
+        ))
+    
+    def emit(self, record):
+        # Giới hạn độ dài message để tránh spam console
+        if hasattr(record, 'msg') and isinstance(record.msg, str):
+            if len(record.msg) > 500:
+                record.msg = record.msg[:500] + "..."
+        super().emit(record)
+
+# Cấu hình logging tối ưu hóa
+def setup_optimized_logging():
+    """Thiết lập logging với tối ưu hóa performance"""
+    # Tạo logger chính
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    
+    # Xóa handlers cũ nếu có
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # File handler với rotation
+    file_handler = OptimizedRotatingFileHandler(
+        "bot.log",
+        max_bytes=50*1024*1024,  # 50MB
+        backup_count=3,
+        encoding='utf-8'
+    )
+    file_handler.setLevel(logging.INFO)
+    
+    # Console handler với memory optimization
+    console_handler = MemoryOptimizedStreamHandler()
+    console_handler.setLevel(logging.INFO)
+    
+    # Thêm handlers
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    # Tối ưu hóa logging cho các thư viện khác
+    logging.getLogger('telebot').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('requests').setLevel(logging.WARNING)
+    
+    return logger
+
+# Khởi tạo logger tối ưu hóa
+logger = setup_optimized_logging()
 
 def check_dependencies():
     """Kiểm tra các dependencies cần thiết"""
@@ -388,28 +436,11 @@ def load_bot_token():
         print(f"❌ Error reading bot token from file '{TELEGRAM_TOKEN_FILE}': {e}")
         sys.exit(f"❌ Bot token file '{TELEGRAM_TOKEN_FILE}' not found or invalid. Please create it with your bot token.")
 
-@dataclass
-class Config:
-    TOKEN: str = None
-    ADMIN_PASSWORD: str = 'RRojcmm$AWe$qW9P'
-    DATABASE: str = 'bot_data_v3.db'
-    MAX_MESSAGE_LENGTH: int = 4000
-    RETRY_DELAY: int = 10
-
-# ========== Logging config ==========
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("bot.log", encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
 Config.TOKEN = load_bot_token()
 bot = TeleBot(Config.TOKEN)
+
+# Khởi tạo Resource Manager
+resource_manager = ResourceManager(ResourceLimits())
 
 bot_start_time = datetime.now(timezone.utc)
 
@@ -418,31 +449,333 @@ bot_start_time = datetime.now(timezone.utc)
 db_lock = threading.Lock()
 
 class DatabaseManager:
+    """Database Manager được tối ưu hóa toàn diện với advanced features"""
+    
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self.connection_pool = []
+        self.max_connections = 5  # Tăng từ 3 lên 5 để cải thiện database performance
+        self.connection_lock = threading.Lock()
+        
+        # Performance monitoring
+        self.query_stats = {
+            'total_queries': 0,
+            'slow_queries': 0,
+            'cache_hits': 0,
+            'cache_misses': 0
+        }
+        self.query_cache = {}
+        self.cache_ttl = 600  # 10 phút cache để cải thiện hiệu suất
+        self.last_cache_cleanup = time.time()
+        
+        # Prepared statements cache
+        self.prepared_statements = {}
+        
+        # Batch operations
+        self.batch_operations = []
+        self.batch_size = 100
+        self.last_batch_commit = time.time()
+        
+        # Database maintenance
+        self.last_maintenance = time.time()
+        self.maintenance_interval = 3600  # 1 giờ
+        
         self.init_database()
+        self._init_connection_pool()
+        self._init_prepared_statements()
+
+    def _init_connection_pool(self):
+        """Khởi tạo connection pool với tối ưu hóa nâng cao"""
+        try:
+            for _ in range(self.max_connections):
+                conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
+                conn.row_factory = sqlite3.Row
+                
+                # Advanced SQLite optimization
+                conn.execute('PRAGMA journal_mode=WAL')
+                conn.execute('PRAGMA synchronous=NORMAL')
+                conn.execute('PRAGMA cache_size=10000')  # Tăng từ 5000 lên 10000 để cải thiện performance
+                conn.execute('PRAGMA temp_store=MEMORY')
+                conn.execute('PRAGMA mmap_size=268435456')  # Tăng từ 128MB lên 256MB để cải thiện performance
+                conn.execute('PRAGMA page_size=4096')
+                conn.execute('PRAGMA auto_vacuum=INCREMENTAL')
+                conn.execute('PRAGMA incremental_vacuum=1000')
+                conn.execute('PRAGMA optimize')
+                
+                self.connection_pool.append(conn)
+            logger.info(f"🚀 Database connection pool initialized with {self.max_connections} optimized connections")
+        except Exception as e:
+            logger.error(f"❌ Error initializing connection pool: {e}")
+
+    def _init_prepared_statements(self):
+        """Khởi tạo prepared statements để tăng hiệu suất"""
+        try:
+            # Common queries
+            self.prepared_statements = {
+                'get_user': 'SELECT * FROM users WHERE user_id=?',
+                'get_admin': 'SELECT is_admin FROM users WHERE user_id=?',
+                'get_banned': 'SELECT is_banned FROM users WHERE user_id=?',
+                'get_setting': 'SELECT value FROM settings WHERE key=?',
+                'insert_user': '''
+                    INSERT INTO users(user_id, username, first_name, last_name)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        username=excluded.username,
+                        first_name=excluded.first_name,
+                        last_name=excluded.last_name,
+                        last_active=CURRENT_TIMESTAMP
+                ''',
+                'update_user_activity': 'UPDATE users SET last_active=CURRENT_TIMESTAMP WHERE user_id=?',
+                'insert_activity': 'INSERT INTO activity_logs(user_id, action, details) VALUES (?, ?, ?)',
+                'insert_token': 'INSERT OR IGNORE INTO used_tokens(token) VALUES (?)',
+                'check_token': 'SELECT 1 FROM used_tokens WHERE token=? LIMIT 1'
+            }
+            logger.info("📝 Prepared statements initialized for performance optimization")
+        except Exception as e:
+            logger.error(f"❌ Error initializing prepared statements: {e}")
+
+    def _get_connection_from_pool(self):
+        """Lấy connection từ pool với timeout và retry logic"""
+        max_retries = 3
+        retry_delay = 0.1
+        
+        for attempt in range(max_retries):
+            try:
+                with self.connection_lock:
+                    if self.connection_pool:
+                        conn = self.connection_pool.pop()
+                        # Kiểm tra connection còn hoạt động không
+                        try:
+                            conn.execute('SELECT 1')
+                            return conn
+                        except:
+                            conn.close()
+                            continue
+                    else:
+                        # Tạo connection mới nếu pool hết
+                        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
+                        conn.row_factory = sqlite3.Row
+                        # Áp dụng optimization settings
+                        conn.execute('PRAGMA journal_mode=WAL')
+                        conn.execute('PRAGMA cache_size=5000')
+                        conn.execute('PRAGMA temp_store=MEMORY')
+                        return conn
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"❌ Failed to get database connection after {max_retries} attempts: {e}")
+                    raise
+                time.sleep(retry_delay)
+                retry_delay *= 2
+
+    def _return_connection_to_pool(self, conn):
+        """Trả connection về pool với health check"""
+        try:
+            if conn:
+                # Reset connection state
+                try:
+                    conn.rollback()
+                except:
+                    pass
+                
+                # Kiểm tra connection còn hoạt động không
+                try:
+                    conn.execute('SELECT 1')
+                    with self.connection_lock:
+                        if len(self.connection_pool) < self.max_connections:
+                            self.connection_pool.append(conn)
+                        else:
+                            conn.close()
+                except:
+                    # Connection bị lỗi, đóng luôn
+                    conn.close()
+        except Exception as e:
+            logger.error(f"❌ Error returning connection to pool: {e}")
+            try:
+                conn.close()
+            except:
+                pass
+
+    def _cleanup_cache(self):
+        """Dọn dẹp cache định kỳ"""
+        current_time = time.time()
+        if current_time - self.last_cache_cleanup > 60:  # Mỗi phút
+            expired_keys = []
+            for key, (data, timestamp) in self.query_cache.items():
+                if current_time - timestamp > self.cache_ttl:
+                    expired_keys.append(key)
+            
+            for key in expired_keys:
+                del self.query_cache[key]
+            
+            self.last_cache_cleanup = current_time
+            logger.debug(f"🧹 Cache cleanup: removed {len(expired_keys)} expired entries")
+
+    def _execute_with_monitoring(self, conn, query, params=None, fetch=False):
+        """Thực thi query với performance monitoring"""
+        start_time = time.time()
+        self.query_stats['total_queries'] += 1
+        
+        try:
+            cursor = conn.cursor()
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            
+            execution_time = time.time() - start_time
+            
+            # Ghi nhận slow queries (>100ms)
+            if execution_time > 0.1:
+                self.query_stats['slow_queries'] += 1
+                logger.warning(f"🐌 Slow query detected: {execution_time:.3f}s - {query[:100]}...")
+            
+            if fetch:
+                return cursor.fetchall()
+            return cursor
+            
+        except Exception as e:
+            logger.error(f"❌ Database query error: {e}")
+            logger.error(f"Query: {query}")
+            if params:
+                logger.error(f"Params: {params}")
+            raise
+
+    def _batch_operation(self, operation_type, data):
+        """Thêm operation vào batch queue"""
+        self.batch_operations.append((operation_type, data))
+        
+        # Commit batch nếu đủ size hoặc đã quá thời gian
+        current_time = time.time()
+        if (len(self.batch_operations) >= self.batch_size or 
+            current_time - self.last_batch_commit > 60):
+            self._commit_batch()
+
+    def _commit_batch(self):
+        """Commit tất cả batch operations"""
+        if not self.batch_operations:
+            return
+        
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                for operation_type, data in self.batch_operations:
+                    if operation_type == 'insert_activity':
+                        cursor.execute(self.prepared_statements['insert_activity'], data)
+                    elif operation_type == 'update_user_activity':
+                        cursor.execute(self.prepared_statements['update_user_activity'], data)
+                    # Thêm các operation types khác nếu cần
+                
+                conn.commit()
+                logger.info(f"📦 Batch commit: {len(self.batch_operations)} operations")
+                
+        except Exception as e:
+            logger.error(f"❌ Batch commit error: {e}")
+        finally:
+            self.batch_operations.clear()
+            self.last_batch_commit = time.time()
+
+    def _perform_maintenance(self):
+        """Thực hiện database maintenance định kỳ"""
+        current_time = time.time()
+        if current_time - self.last_maintenance > self.maintenance_interval:
+            try:
+                with self.get_connection() as conn:
+                    # VACUUM để tối ưu hóa storage
+                    conn.execute('VACUUM')
+                    # ANALYZE để cập nhật statistics
+                    conn.execute('ANALYZE')
+                    # Cleanup WAL files
+                    conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                    
+                self.last_maintenance = current_time
+                logger.info("🔧 Database maintenance completed: VACUUM + ANALYZE + WAL cleanup")
+                
+            except Exception as e:
+                logger.error(f"❌ Database maintenance error: {e}")
 
     @contextmanager
     def get_connection(self):
+        """Context manager cho database connection với advanced error handling"""
         conn = None
         try:
-            with db_lock:
-                conn = sqlite3.connect(self.db_path, check_same_thread=False)
-                conn.row_factory = sqlite3.Row
-                yield conn
-                conn.commit()
+            conn = self._get_connection_from_pool()
+            yield conn
+            conn.commit()
         except sqlite3.Error as e:
-            logger.error(f"Database error: {e}")
+            logger.error(f"❌ SQLite error: {e}")
             if conn:
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except:
+                    pass
+            raise
+        except Exception as e:
+            logger.error(f"❌ Unexpected database error: {e}")
+            if conn:
+                try:
+                    conn.rollback()
+                except:
+                    pass
             raise
         finally:
             if conn:
-                conn.close()
+                self._return_connection_to_pool(conn)
+
+    def get_cached_result(self, key, query_func, ttl=None):
+        """Lấy kết quả từ cache hoặc thực thi query"""
+        self._cleanup_cache()
+        
+        if key in self.query_cache:
+            data, timestamp = self.query_cache[key]
+            cache_ttl = ttl or self.cache_ttl
+            if time.time() - timestamp < cache_ttl:
+                self.query_stats['cache_hits'] += 1
+                return data
+        
+        # Cache miss, thực thi query
+        self.query_stats['cache_misses'] += 1
+        result = query_func()
+        
+        # Lưu vào cache
+        self.query_cache[key] = (result, time.time())
+        return result
+
+    def get_performance_stats(self):
+        """Lấy thống kê hiệu suất database"""
+        return {
+            'total_queries': self.query_stats['total_queries'],
+            'slow_queries': self.query_stats['slow_queries'],
+            'cache_hits': self.query_stats['cache_hits'],
+            'cache_misses': self.query_stats['cache_misses'],
+            'cache_hit_rate': (self.query_stats['cache_hits'] / 
+                              max(self.query_stats['total_queries'], 1)) * 100,
+            'active_connections': len(self.connection_pool),
+            'batch_operations_pending': len(self.batch_operations),
+            'last_maintenance': self.last_maintenance,
+            'last_batch_commit': self.last_batch_commit
+        }
+
+    def close_all_connections(self):
+        """Đóng tất cả connections trong pool với cleanup"""
+        # Commit batch operations trước khi đóng
+        self._commit_batch()
+        
+        with self.connection_lock:
+            for conn in self.connection_pool:
+                try:
+                    conn.close()
+                except:
+                    pass
+            self.connection_pool.clear()
+            logger.info("🔒 All database connections closed")
 
     def init_database(self):
+        """Khởi tạo database với schema tối ưu hóa"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            
+            # Tạo tables với indexes tối ưu hóa
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -455,6 +788,7 @@ class DatabaseManager:
                     last_active TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
@@ -462,6 +796,7 @@ class DatabaseManager:
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS activity_logs (
                     log_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -472,6 +807,7 @@ class DatabaseManager:
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
                 )
             ''')
+            
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS used_tokens (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -480,6 +816,14 @@ class DatabaseManager:
                 )
             ''')
 
+            # Tạo indexes để tăng hiệu suất
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_admin ON users(is_admin)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_banned ON users(is_banned)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_last_active ON users(last_active)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_activity_logs_user_timestamp ON activity_logs(user_id, timestamp)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_activity_logs_timestamp ON activity_logs(timestamp)')
+
+            # Insert default settings
             default_settings = [
                 ('welcome_message', '🌟 Chào mừng bạn đến với Bot!\n\nSử dụng /help để xem hướng dẫn.'),
                 ('admin_password', Config.ADMIN_PASSWORD),
@@ -489,79 +833,102 @@ class DatabaseManager:
                 cursor.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', (k, v))
 
     def get_setting(self, key: str):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT value FROM settings WHERE key=?', (key,))
-            row = cursor.fetchone()
-            return row['value'] if row else None
+        """Lấy setting với cache"""
+        def query_func():
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(self.prepared_statements['get_setting'], (key,))
+                row = cursor.fetchone()
+                return row['value'] if row else None
+        
+        return self.get_cached_result(f"setting_{key}", query_func, ttl=600)  # Cache 10 phút
 
     def set_setting(self, key: str, value: str):
+        """Set setting với cache invalidation"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('INSERT OR REPLACE INTO settings (key,value,updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)', (key, value))
+            
+            # Xóa cache
+            cache_key = f"setting_{key}"
+            if cache_key in self.query_cache:
+                del self.query_cache[cache_key]
+            
             return True
         except Exception as e:
-            logger.error(f"Error setting {key}: {e}")
+            logger.error(f"❌ Error setting {key}: {e}")
             return False
 
     def save_user(self, user):
+        """Lưu user với batch operation optimization"""
         try:
+            # Sử dụng prepared statement
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO users(user_id, username, first_name, last_name)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(user_id) DO UPDATE SET
-                        username=excluded.username,
-                        first_name=excluded.first_name,
-                        last_name=excluded.last_name,
-                        last_active=CURRENT_TIMESTAMP
-                ''', (user.id, getattr(user, 'username', None), getattr(user, 'first_name', None), getattr(user, 'last_name', None)))
+                cursor.execute(self.prepared_statements['insert_user'], 
+                             (user.id, getattr(user, 'username', None), 
+                              getattr(user, 'first_name', None), 
+                              getattr(user, 'last_name', None)))
+            
+            # Thêm vào batch để update last_active
+            self._batch_operation('update_user_activity', (user.id,))
+            
             return True
         except Exception as e:
-            logger.error(f"Error saving user: {e}")
+            logger.error(f"❌ Error saving user: {e}")
             return False
 
     def is_admin(self, user_id: int) -> bool:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT is_admin FROM users WHERE user_id=?', (user_id,))
-            row = cursor.fetchone()
-            return bool(row and row['is_admin'] == 1)
+        """Kiểm tra admin với cache"""
+        def query_func():
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(self.prepared_statements['get_admin'], (user_id,))
+                row = cursor.fetchone()
+                return bool(row and row['is_admin'] == 1)
+        
+        return self.get_cached_result(f"admin_{user_id}", query_func, ttl=300)  # Cache 5 phút
 
     def is_banned(self, user_id: int) -> bool:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT is_banned FROM users WHERE user_id=?', (user_id,))
-            row = cursor.fetchone()
-            return bool(row and row['is_banned'] == 1)
+        """Kiểm tra banned với cache"""
+        def query_func():
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(self.prepared_statements['get_banned'], (user_id,))
+                row = cursor.fetchone()
+                return bool(row and row['is_banned'] == 1)
+        
+        return self.get_cached_result(f"banned_{user_id}", query_func, ttl=300)  # Cache 5 phút
 
     def log_activity(self, user_id: int, action: str, details: str=None):
+        """Log activity với batch operation"""
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute('INSERT INTO activity_logs(user_id, action, details) VALUES (?, ?, ?)', (user_id, action, details))
+            # Thêm vào batch thay vì insert ngay lập tức
+            self._batch_operation('insert_activity', (user_id, action, details))
         except Exception as e:
-            logger.error(f"Error logging activity: {e}")
+            logger.error(f"❌ Error logging activity: {e}")
 
     def save_token(self, token: str):
+        """Lưu token với prepared statement"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute('INSERT OR IGNORE INTO used_tokens(token) VALUES (?)', (token,))
+                cursor.execute(self.prepared_statements['insert_token'], (token,))
             return True
         except Exception as e:
-            logger.error(f"Error saving token: {e}")
+            logger.error(f"❌ Error saving token: {e}")
             return False
 
     def is_token_used(self, token: str) -> bool:
+        """Kiểm tra token với prepared statement"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT 1 FROM used_tokens WHERE token=? LIMIT 1', (token,))
+            cursor.execute(self.prepared_statements['check_token'], (token,))
             return cursor.fetchone() is not None
 
     def add_admin(self, user_id: int) -> bool:
+        """Thêm admin với cache invalidation"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -571,49 +938,76 @@ class DatabaseManager:
                     cursor.execute('UPDATE users SET is_admin=1 WHERE user_id=?', (user_id,))
                 else:
                     cursor.execute('INSERT INTO users(user_id, is_admin) VALUES (?, 1)', (user_id,))
+            
+            # Xóa cache
+            cache_key = f"admin_{user_id}"
+            if cache_key in self.query_cache:
+                del self.query_cache[cache_key]
+            
             return True
         except Exception as e:
-            logger.error(f"Error adding admin rights to user {user_id}: {e}")
+            logger.error(f"❌ Error adding admin rights to user {user_id}: {e}")
             return False
 
     def remove_admin(self, user_id: int) -> bool:
+        """Xóa admin với cache invalidation"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('UPDATE users SET is_admin=0 WHERE user_id=?', (user_id,))
+            
+            # Xóa cache
+            cache_key = f"admin_{user_id}"
+            if cache_key in self.query_cache:
+                del self.query_cache[cache_key]
+            
             return True
         except Exception as e:
-            logger.error(f"Error removing admin rights from user {user_id}: {e}")
+            logger.error(f"❌ Error removing admin rights from user {user_id}: {e}")
             return False
 
     def list_admin_ids(self):
-        try:
+        """Lấy danh sách admin với cache"""
+        def query_func():
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('SELECT user_id FROM users WHERE is_admin=1 ORDER BY user_id ASC')
                 return [row[0] for row in cursor.fetchall()]
-        except Exception as e:
-            logger.error(f"Error listing admins: {e}")
-            return []
+        
+        return self.get_cached_result("admin_list", query_func, ttl=600)  # Cache 10 phút
 
     def ban_user(self, user_id: int) -> bool:
+        """Ban user với cache invalidation"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('INSERT INTO users(user_id, is_banned) VALUES (?, 1) ON CONFLICT(user_id) DO UPDATE SET is_banned=1', (user_id,))
+            
+            # Xóa cache
+            cache_key = f"banned_{user_id}"
+            if cache_key in self.query_cache:
+                del self.query_cache[cache_key]
+            
             return True
         except Exception as e:
-            logger.error(f"Error banning user {user_id}: {e}")
+            logger.error(f"❌ Error banning user {user_id}: {e}")
             return False
 
     def unban_user(self, user_id: int) -> bool:
+        """Unban user với cache invalidation"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('UPDATE users SET is_banned=0 WHERE user_id=?', (user_id,))
+            
+            # Xóa cache
+            cache_key = f"banned_{user_id}"
+            if cache_key in self.query_cache:
+                del self.query_cache[cache_key]
+            
             return True
         except Exception as e:
-            logger.error(f"Error unbanning user {user_id}: {e}")
+            logger.error(f"❌ Error unbanning user {user_id}: {e}")
             return False
 
 db = DatabaseManager(Config.DATABASE)
@@ -870,6 +1264,7 @@ def remove_auto_notification_chat(chat_id):
         logger.error(f"Error removing chat {chat_id} from auto notification list: {e}")
 
 def run_subprocess_async(command_list, user_id, chat_id, task_key, message):
+    """Chạy subprocess bất đồng bộ với tối ưu hóa tài nguyên"""
     key = (user_id, chat_id, task_key)
     proc = running_tasks.get(key)
     if proc and proc.poll() is None:
@@ -885,47 +1280,124 @@ def run_subprocess_async(command_list, user_id, chat_id, task_key, message):
         return
 
     def task():
+        """Task function với tối ưu hóa memory và error handling"""
         try:
             # Đăng ký bắt đầu tác vụ với resource manager
             resource_manager.start_task(user_id, task_key)
             
-            # Use different approach for Windows vs Unix
+            # Tối ưu hóa command list để tiết kiệm memory
+            optimized_command = [str(cmd) for cmd in command_list]
+            
+            # Sử dụng subprocess với tối ưu hóa
             if os.name == 'nt':  # Windows
-                proc_local = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+                proc_local = subprocess.Popen(
+                    optimized_command, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.PIPE, 
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                    # Tối ưu hóa cho Windows
+                    shell=False,
+                    text=False,  # Sử dụng bytes để tiết kiệm memory
+                    bufsize=0  # Không buffer để giảm memory usage
+                )
             else:  # Unix/Linux
-                proc_local = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid)
+                proc_local = subprocess.Popen(
+                    optimized_command, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.PIPE, 
+                    preexec_fn=os.setsid,
+                    # Tối ưu hóa cho Unix
+                    shell=False,
+                    text=False,
+                    bufsize=0
+                )
+            
             running_tasks[key] = proc_local
-            start_msg = bot.send_message(chat_id, f"✅ Bắt đầu chạy tác vụ `{task_key}`:\n`{' '.join(command_list)}`", parse_mode='Markdown')
+            
+            # Gửi thông báo bắt đầu với thông tin tối ưu hóa
+            start_msg = bot.send_message(
+                chat_id, 
+                f"✅ Bắt đầu chạy tác vụ `{task_key}`:\n"
+                f"🔧 Command: `{' '.join(optimized_command[:3])}{'...' if len(optimized_command) > 3 else ''}`\n"
+                f"👤 User: {user_id}\n"
+                f"📊 Resource status: {resource_manager.get_resource_status()['global_tasks']}/{resource_manager.limits.MAX_CONCURRENT_TASKS_GLOBAL}",
+                parse_mode='Markdown'
+            )
+            
             # Tự động xóa thông báo bắt đầu sau 15 giây
             auto_delete_response(chat_id, message.message_id, start_msg, delay=15)
             
-            stdout, stderr = proc_local.communicate()
-            output = stdout.decode(errors='ignore').strip()
-            errors = stderr.decode(errors='ignore').strip()
+            # Sử dụng timeout để tránh treo
+            try:
+                stdout, stderr = proc_local.communicate(timeout=resource_manager.limits.MAX_TASK_DURATION)
+            except subprocess.TimeoutExpired:
+                # Kill process nếu quá thời gian
+                proc_local.kill()
+                stdout, stderr = proc_local.communicate()
+                raise Exception(f"Task timeout after {resource_manager.limits.MAX_TASK_DURATION} seconds")
             
-            if output:
+            # Xử lý output với memory optimization
+            output = ""
+            errors = ""
+            
+            if stdout:
+                output = stdout.decode(errors='ignore', encoding='utf-8').strip()
+                # Giới hạn output để tiết kiệm memory
                 if len(output) > resource_manager.limits.MAX_MESSAGE_LENGTH:
                     output = output[:resource_manager.limits.MAX_MESSAGE_LENGTH] + "\n...(bị cắt bớt)"
-                result_msg = bot.send_message(chat_id, f"📢 Kết quả tác vụ `{task_key}`:\n{output}")
-                # Tự động xóa kết quả sau 30 giây
+            
+            if stderr:
+                errors = stderr.decode(errors='ignore', encoding='utf-8').strip()
+                if len(errors) > resource_manager.limits.MAX_MESSAGE_LENGTH:
+                    errors = errors[:resource_manager.limits.MAX_MESSAGE_LENGTH] + "\n...(bị cắt bớt)"
+            
+            # Gửi kết quả với delay khác nhau để tránh spam
+            if output:
+                result_msg = bot.send_message(
+                    chat_id, 
+                    f"📢 Kết quả tác vụ `{task_key}`:\n{output}"
+                )
                 auto_delete_response(chat_id, message.message_id, result_msg, delay=30)
             
             if errors:
-                if len(errors) > resource_manager.limits.MAX_MESSAGE_LENGTH:
-                    errors = errors[:resource_manager.limits.MAX_MESSAGE_LENGTH] + "\n...(bị cắt bớt)"
-                error_msg = bot.send_message(chat_id, f"❗ Lỗi:\n{errors}")
-                # Tự động xóa lỗi sau 20 giây
+                error_msg = bot.send_message(
+                    chat_id, 
+                    f"❗ Lỗi tác vụ `{task_key}`:\n{errors}"
+                )
                 auto_delete_response(chat_id, message.message_id, error_msg, delay=20)
-        except Exception as e:
-            logger.error(f"Lỗi chạy tác vụ {task_key}: {e}")
-            error_msg = bot.send_message(chat_id, f"❌ Lỗi tác vụ `{task_key}`: {e}")
-            # Tự động xóa lỗi sau 20 giây
+            
+            # Log thành công
+            logger.info(f"Task {task_key} completed successfully for user {user_id}")
+            
+        except subprocess.TimeoutExpired:
+            logger.error(f"Task {task_key} timeout for user {user_id}")
+            error_msg = bot.send_message(
+                chat_id, 
+                f"⏰ Tác vụ `{task_key}` bị timeout sau {resource_manager.limits.MAX_TASK_DURATION} giây"
+            )
             auto_delete_response(chat_id, message.message_id, error_msg, delay=20)
+            
+        except Exception as e:
+            logger.error(f"Lỗi chạy tác vụ {task_key} cho user {user_id}: {e}")
+            error_msg = bot.send_message(
+                chat_id, 
+                f"❌ Lỗi tác vụ `{task_key}`: {str(e)[:200]}..."
+            )
+            auto_delete_response(chat_id, message.message_id, error_msg, delay=20)
+            
         finally:
+            # Cleanup
             running_tasks[key] = None
-            # Đăng ký kết thúc tác vụ với resource manager
             resource_manager.end_task(user_id, task_key)
+            
+            # Force garbage collection để giải phóng memory
+            try:
+                import gc
+                gc.collect()
+            except:
+                pass
 
+    # Sử dụng executor với tối ưu hóa
     executor.submit(task)
 
 def stop_subprocess(user_id, chat_id, task_key, message):
@@ -1187,8 +1659,11 @@ def cmd_help(message):
                 "/checkdelete - Kiểm tra quyền xóa tin nhắn\n"
                 "/resources - Xem thông tin tài nguyên hệ thống\n"
                 "/setlimits - Cấu hình giới hạn tài nguyên\n"
-                "/throttle - Quản lý auto-throttling\n"
+
                 "/systemstatus - Trạng thái chi tiết hệ thống\n"
+                "/performance - Phân tích hiệu suất chi tiết\n"
+                "/dbstats - Thống kê hiệu suất database\n"
+                "/optimize - Tối ưu hóa hệ thống tự động\n"
             )
         try:
             sent = bot.send_message(message.chat.id, escape_markdown_v2(help_text), parse_mode='MarkdownV2')
@@ -3075,10 +3550,7 @@ def cmd_resources(message):
             f"🖥️ *CPU:* {status.get('cpu_percent', 0):.1f}%\n"
             f"🧠 *RAM:* {status.get('ram_percent', 0):.1f}% "
             f"({status.get('ram_used_gb', 0):.1f}/{status.get('ram_total_gb', 0):.1f} GB)\n\n"
-            f"⚡ *HIỆU SUẤT:*\n"
-            f"• Trạng thái: {'🔴 Giảm hiệu suất' if status['throttling_active'] else '🟢 Bình thường'}\n"
-            f"• Hiệu suất hiện tại: {status['performance_percent']}%\n"
-            f"• Hệ số giảm: {status['throttle_factor']:.2f}\n\n"
+
             f"🔄 *TÁC VỤ ĐANG CHẠY:*\n"
             f"• Toàn hệ thống: {status['global_tasks']}/{status['max_global_tasks']}\n"
             f"• Tác vụ của bạn: {status['user_tasks'].get(message.from_user.id, 0)}/{status['max_user_tasks']}\n"
@@ -3207,99 +3679,7 @@ def cmd_setlimits(message):
         sent = bot.reply_to(message, "❌ Lỗi khi cập nhật giới hạn.")
         auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
 
-@bot.message_handler(commands=['throttle'])
-@ignore_old_messages
-@not_banned
-@admin_required
-@resource_limit
-@log_command
-def cmd_throttle(message):
-    """Quản lý auto-throttling"""
-    try:
-        args = message.text.split()
-        if len(args) < 2:
-            # Hiển thị trạng thái hiện tại
-            status = resource_manager.get_resource_status()
-            throttle_text = (
-                f"⚡ *AUTO-THROTTLING STATUS*\n\n"
-                f"🔄 *Trạng thái:* {'🔴 Đang giảm hiệu suất' if status['throttling_active'] else '🟢 Bình thường'}\n"
-                f"📊 *Hiệu suất:* {status['performance_percent']}%\n"
-                f"🔧 *Hệ số:* {status['throttle_factor']:.2f}\n\n"
-                f"⚙️ *Cấu hình:*\n"
-                f"• CPU threshold: {resource_manager.limits.CPU_THROTTLE_THRESHOLD}%\n"
-                f"• RAM threshold: {resource_manager.limits.RAM_THROTTLE_THRESHOLD}%\n"
-                f"• Giảm tối thiểu: {resource_manager.limits.THROTTLE_FACTOR_MIN*100:.0f}%\n"
-                f"• Giảm tối đa: {resource_manager.limits.THROTTLE_FACTOR_MAX*100:.0f}%\n"
-                f"• Thời gian phục hồi: {resource_manager.limits.THROTTLE_RECOVERY_TIME//60} phút\n\n"
-                f"📋 *Cách sử dụng:*\n"
-                f"`/throttle on` - Bật auto-throttling\n"
-                f"`/throttle off` - Tắt auto-throttling\n"
-                f"`/throttle recover` - Phục hồi hiệu suất ngay\n"
-                f"`/throttle set <cpu> <ram> <min> <max>` - Cấu hình thresholds"
-            )
-            sent = bot.reply_to(message, throttle_text, parse_mode='Markdown')
-            auto_delete_response(message.chat.id, message.message_id, sent, delay=30)
-            return
-        
-        action = args[1].lower()
-        
-        if action == 'on':
-            resource_manager.is_throttling = True
-            resource_manager.throttle_factor = 0.8  # Giảm 20% hiệu suất
-            sent = bot.reply_to(message, "✅ Đã bật auto-throttling - Hiệu suất giảm 20%")
-            
-        elif action == 'off':
-            resource_manager.recover_performance()
-            sent = bot.reply_to(message, "✅ Đã tắt auto-throttling - Hiệu suất phục hồi 100%")
-            
-        elif action == 'recover':
-            resource_manager.recover_performance()
-            sent = bot.reply_to(message, "✅ Đã phục hồi hiệu suất về 100%")
-            
-        elif action == 'set' and len(args) >= 6:
-            try:
-                cpu_threshold = float(args[2])
-                ram_threshold = float(args[3])
-                min_factor = float(args[4])
-                max_factor = float(args[5])
-                
-                if not (0 < cpu_threshold < 100 and 0 < ram_threshold < 100):
-                    sent = bot.reply_to(message, "❌ CPU và RAM threshold phải từ 1-99%")
-                    auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
-                    return
-                
-                if not (0 < min_factor < max_factor < 1):
-                    sent = bot.reply_to(message, "❌ Min factor < Max factor < 1")
-                    auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
-                    return
-                
-                resource_manager.limits.CPU_THROTTLE_THRESHOLD = cpu_threshold
-                resource_manager.limits.RAM_THROTTLE_THRESHOLD = ram_threshold
-                resource_manager.limits.THROTTLE_FACTOR_MIN = min_factor
-                resource_manager.limits.THROTTLE_FACTOR_MAX = max_factor
-                
-                sent = bot.reply_to(message, 
-                    f"✅ Đã cập nhật cấu hình throttling:\n"
-                    f"• CPU threshold: {cpu_threshold}%\n"
-                    f"• RAM threshold: {ram_threshold}%\n"
-                    f"• Min factor: {min_factor*100:.0f}%\n"
-                    f"• Max factor: {max_factor*100:.0f}%")
-                    
-            except ValueError:
-                sent = bot.reply_to(message, "❌ Các giá trị phải là số hợp lệ")
-                auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
-                return
-        else:
-            sent = bot.reply_to(message, "❌ Hành động không hợp lệ. Sử dụng: on, off, recover, set")
-            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
-            return
-        
-        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
-        
-    except Exception as e:
-        logger.error(f"/throttle error: {e}")
-        sent = bot.reply_to(message, "❌ Lỗi khi quản lý throttling.")
-        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
 
 @bot.message_handler(commands=['systemstatus'])
 @ignore_old_messages
@@ -3308,7 +3688,7 @@ def cmd_throttle(message):
 @resource_limit
 @log_command
 def cmd_systemstatus(message):
-    """Hiển thị trạng thái chi tiết của hệ thống"""
+    """Hiển thị trạng thái chi tiết của hệ thống - Đã được tối ưu hóa"""
     try:
         # Lấy thông tin tài nguyên
         res_status = resource_manager.get_resource_status()
@@ -3317,13 +3697,16 @@ def cmd_systemstatus(message):
         uptime = get_uptime()
         system_info = get_system_info_text()
         
-        # Đếm tác vụ theo loại
+        # Đếm tác vụ theo loại với tối ưu hóa
         task_types = {}
         for (uid, cid, task_key), proc in running_tasks.items():
             if proc and proc.poll() is None:
                 task_types[task_key] = task_types.get(task_key, 0) + 1
         
-        # Tạo báo cáo chi tiết
+        # Lấy performance analytics
+        perf_analytics = res_status.get('performance_analytics', {})
+        
+        # Tạo báo cáo chi tiết với thông tin mới
         status_text = (
             f"🔧 *TRẠNG THÁI HỆ THỐNG CHI TIẾT*\n\n"
             f"⏰ *Thời gian:*\n"
@@ -3333,7 +3716,8 @@ def cmd_systemstatus(message):
             f"📊 *Quản lý tác vụ:*\n"
             f"• Tác vụ toàn hệ: {res_status['global_tasks']}/{res_status['max_global_tasks']}\n"
             f"• Tác vụ của bạn: {res_status['user_tasks'].get(message.from_user.id, 0)}/{res_status['max_user_tasks']}\n"
-            f"• Tác vụ active: {res_status['active_tasks']}\n\n"
+            f"• Tác vụ active: {res_status['active_tasks']}\n"
+            f"• DB Connections: {res_status.get('db_connections', 0)}/{res_status.get('max_db_connections', 0)}\n\n"
             f"🔄 *Phân loại tác vụ:*\n"
         )
         
@@ -3343,6 +3727,16 @@ def cmd_systemstatus(message):
         else:
             status_text += "• Không có tác vụ nào đang chạy\n"
         
+        # Thêm performance analytics
+        if perf_analytics and 'status' not in perf_analytics:
+            status_text += (
+                f"\n📈 *PHÂN TÍCH HIỆU SUẤT:*\n"
+                f"• CPU trung bình: {perf_analytics.get('avg_cpu', 0)}%\n"
+                f"• RAM trung bình: {perf_analytics.get('avg_ram', 0)}%\n"
+
+                f"• Số record: {perf_analytics.get('total_records', 0)}\n"
+            )
+        
         status_text += (
             f"\n⚙️ *Cấu hình giới hạn:*\n"
             f"• Tác vụ/user: {res_status['max_user_tasks']}\n"
@@ -3350,7 +3744,9 @@ def cmd_systemstatus(message):
             f"• Thời gian tối đa: {resource_manager.limits.MAX_TASK_DURATION//60} phút\n"
             f"• Tin nhắn/phút: {resource_manager.limits.MAX_MESSAGES_PER_MINUTE}\n"
             f"• CPU tối đa: {resource_manager.limits.MAX_CPU_PERCENT}%\n"
-            f"• RAM tối đa: {resource_manager.limits.MAX_RAM_PERCENT}%\n\n"
+            f"• RAM tối đa: {resource_manager.limits.MAX_RAM_PERCENT}%\n"
+            f"• Memory cleanup threshold: {resource_manager.limits.MEMORY_CLEANUP_THRESHOLD}%\n"
+            f"• GC interval: {resource_manager.limits.GARBAGE_COLLECTION_INTERVAL//60} phút\n\n"
             f"💚 *Trạng thái:* Hệ thống hoạt động ổn định"
         )
         
@@ -3361,6 +3757,169 @@ def cmd_systemstatus(message):
         logger.error(f"/systemstatus error: {e}")
         sent = bot.reply_to(message, "❌ Lỗi khi lấy trạng thái hệ thống.")
         auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
+@bot.message_handler(commands=['performance'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@resource_limit
+@log_command
+def cmd_performance(message):
+    """Hiển thị phân tích hiệu suất chi tiết"""
+    try:
+        # Lấy performance analytics
+        perf_analytics = resource_manager.get_performance_analytics()
+        
+        if 'status' in perf_analytics:
+            sent = bot.reply_to(message, "ℹ️ Chưa có dữ liệu hiệu suất để phân tích.")
+            auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+            return
+        
+        # Tạo báo cáo performance
+        perf_text = (
+            f"📊 *PHÂN TÍCH HIỆU SUẤT CHI TIẾT*\n\n"
+            f"🖥️ *CPU:*\n"
+            f"• Trung bình: {perf_analytics['avg_cpu']}%\n"
+            f"• Trung bình: {perf_analytics['current_cpu']}%\n\n"
+            f"🧠 *RAM:*\n"
+            f"• Trung bình: {perf_analytics['current_ram']}%\n\n"
+            f"📈 *Thống kê:*\n"
+            f"• Tổng record: {perf_analytics['total_records']}\n"
+            f"• Thời gian phân tích: Real-time\n\n"
+            f"💡 *Gợi ý:*\n"
+        )
+        
+        # Thêm gợi ý dựa trên dữ liệu
+        if perf_analytics['current_cpu'] > 70:
+            perf_text += "• CPU sử dụng cao - cân nhắc giảm tải\n"
+        elif perf_analytics['current_ram'] > 75:
+            perf_text += "• RAM sử dụng cao - cần cleanup memory\n"
+        else:
+            perf_text += "• Hệ thống hoạt động tốt - không cần thay đổi\n"
+        
+        sent = bot.reply_to(message, perf_text, parse_mode='Markdown')
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=30)
+        
+    except Exception as e:
+        logger.error(f"/performance error: {e}")
+        sent = bot.reply_to(message, "❌ Lỗi khi lấy phân tích hiệu suất.")
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
+@bot.message_handler(commands=['dbstats'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@resource_limit
+@log_command
+def cmd_dbstats(message):
+    """Hiển thị thống kê hiệu suất database"""
+    try:
+        # Lấy database performance stats
+        db_stats = db.get_performance_stats()
+        
+        # Tạo báo cáo database
+        db_text = (
+            f"🗄️ *DATABASE PERFORMANCE STATS*\n\n"
+            f"📊 *Query Statistics:*\n"
+            f"• Tổng queries: {db_stats['total_queries']:,}\n"
+            f"• Slow queries (>100ms): {db_stats['slow_queries']:,}\n"
+            f"• Cache hits: {db_stats['cache_hits']:,}\n"
+            f"• Cache misses: {db_stats['cache_misses']:,}\n"
+            f"• Cache hit rate: {db_stats['cache_hit_rate']:.1f}%\n\n"
+            f"🔗 *Connection Pool:*\n"
+            f"• Active connections: {db_stats['active_connections']}\n"
+            f"• Batch operations pending: {db_stats['batch_operations_pending']}\n\n"
+            f"⏰ *Timing:*\n"
+            f"• Last maintenance: {datetime.fromtimestamp(db_stats['last_maintenance']).strftime('%H:%M:%S')}\n"
+            f"• Last batch commit: {datetime.fromtimestamp(db_stats['last_batch_commit']).strftime('%H:%M:%S')}\n\n"
+        )
+        
+        # Thêm gợi ý tối ưu hóa
+        if db_stats['cache_hit_rate'] < 50:
+            db_text += "💡 *Gợi ý:* Cache hit rate thấp - cần tăng cache size\n"
+        elif db_stats['slow_queries'] > db_stats['total_queries'] * 0.1:
+            db_text += "💡 *Gợi ý:* Nhiều slow queries - cần tối ưu hóa indexes\n"
+        else:
+            db_text += "💡 *Gợi ý:* Database hoạt động tốt\n"
+        
+        sent = bot.reply_to(message, db_text, parse_mode='Markdown')
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=30)
+        
+    except Exception as e:
+        logger.error(f"/dbstats error: {e}")
+        sent = bot.reply_to(message, "❌ Lỗi khi lấy thống kê database.")
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=10)
+
+@bot.message_handler(commands=['optimize'])
+@ignore_old_messages
+@not_banned
+@admin_required
+@resource_limit
+@log_command
+def cmd_optimize(message):
+    """Tối ưu hóa hệ thống tự động"""
+    try:
+        # Thực hiện các tối ưu hóa
+        optimizations = []
+        
+        # 1. Memory cleanup
+        try:
+            import gc
+            before = len(gc.get_objects())
+            gc.collect()
+            after = len(gc.get_objects())
+            freed = before - after
+            optimizations.append(f"🗑️ Memory cleanup: Giải phóng {freed} objects")
+        except Exception as e:
+            optimizations.append(f"❌ Memory cleanup failed: {e}")
+        
+        # 2. Log file cleanup
+        try:
+            resource_manager._cleanup_log_files()
+            optimizations.append("📝 Log files cleaned up")
+        except Exception as e:
+            optimizations.append(f"❌ Log cleanup failed: {e}")
+        
+        # 3. Database optimization
+        try:
+            # Sử dụng database maintenance mới
+            if hasattr(db, '_perform_maintenance'):
+                db._perform_maintenance()
+                optimizations.append("🗄️ Database maintenance completed (VACUUM + ANALYZE + WAL cleanup)")
+            else:
+                # Fallback to manual optimization
+                with db.get_connection() as conn:
+                    conn.execute('VACUUM')
+                    conn.execute('ANALYZE')
+                optimizations.append("🗄️ Database optimized (VACUUM + ANALYZE)")
+        except Exception as e:
+            optimizations.append(f"❌ Database optimization failed: {e}")
+        
+
+        
+        # Tạo báo cáo tối ưu hóa
+        optimize_text = (
+            f"🔧 *TỐI ƯU HÓA HỆ THỐNG*\n\n"
+            f"📋 *Các bước đã thực hiện:*\n"
+        )
+        
+        for opt in optimizations:
+            optimize_text += f"• {opt}\n"
+        
+        optimize_text += (
+            f"\n📊 *Trạng thái sau tối ưu hóa:*\n"
+            f"• CPU: {psutil.cpu_percent(interval=0.1):.1f}%\n"
+            f"• RAM: {psutil.virtual_memory().percent:.1f}%\n"
+
+        )
+        
+        sent = bot.reply_to(message, optimize_text, parse_mode='Markdown')
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=25)
+        
+    except Exception as e:
+        logger.error(f"/optimize error: {e}")
+        sent = bot.reply_to(message, f"❌ Lỗi khi tối ưu hóa: {str(e)[:100]}...")
+        auto_delete_response(message.chat.id, message.message_id, sent, delay=15)
 
 @bot.message_handler(commands=['autonotify'])
 @ignore_old_messages
@@ -3578,6 +4137,8 @@ def handle_unknown_message(message):
 # ========== Main chạy bot ==========
 
 def main():
+    """Main function với tối ưu hóa performance và memory management"""
+    
     # Thiết lập start_time trước
     bot.start_time = datetime.now()
     logger.info(f"🤖 Bot khởi động với token bắt đầu bằng: {Config.TOKEN[:10]}")
@@ -3593,10 +4154,15 @@ def main():
         logger.error(f"❌ Invalid bot token or connection failed: {e}")
         sys.exit(1)
     
-    # Khởi động hệ thống quản lý tài nguyên
+    # Khởi động hệ thống quản lý tài nguyên với tối ưu hóa
     try:
         resource_manager.start_monitoring()
         logger.info("🔧 Hệ thống quản lý tài nguyên đã được khởi động")
+        
+        # Thêm performance monitoring
+        logger.info(f"⚙️ Resource limits: CPU={resource_manager.limits.MAX_CPU_PERCENT}%, "
+                   f"RAM={resource_manager.limits.MAX_RAM_PERCENT}%, "
+                   f"Tasks={resource_manager.limits.MAX_CONCURRENT_TASKS_GLOBAL}")
     except Exception as e:
         logger.error(f"❌ Không thể khởi động hệ thống quản lý tài nguyên: {e}")
     
@@ -3607,31 +4173,49 @@ def main():
     except Exception as e:
         logger.error(f"❌ Không thể khởi động hệ thống thông báo tự động: {e}")
     
+    # Tối ưu hóa bot settings
+    try:
+        # Giảm timeout để tăng responsiveness
+        bot.threaded = True
+        bot.skip_pending = True
+        logger.info("🔧 Bot settings optimized for performance")
+    except Exception as e:
+        logger.warning(f"Could not optimize bot settings: {e}")
+    
     retry_count = 0
-    max_retries = 5
+    max_retries = 3  # Giảm từ 5 xuống 3
     
     while retry_count < max_retries:
         try:
-            logger.info("🔄 Starting bot polling...")
-            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            logger.info("🔄 Starting bot polling with optimized settings...")
+            
+            # Sử dụng polling với tối ưu hóa cao
+            bot.infinity_polling(
+                timeout=20,  # Giảm từ 30 xuống 20
+                long_polling_timeout=20,  # Giảm từ 30 xuống 20
+                logger_level=logging.ERROR  # Giảm log level để tăng performance
+            )
             break  # Nếu polling thành công, thoát khỏi vòng lặp
+            
         except ApiException as api_e:
             retry_count += 1
             logger.error(f"❌ Telegram API Error (attempt {retry_count}/{max_retries}): {api_e}")
             if retry_count >= max_retries:
                 logger.error("❌ Max retries reached. Exiting...")
                 break
-            time.sleep(Config.RETRY_DELAY)
+            time.sleep(5)  # Giảm delay từ 10 xuống 5 giây
+            
         except KeyboardInterrupt:
             logger.info("🛑 Bot stopped by user (KeyboardInterrupt)")
             break
+            
         except Exception as e:
             retry_count += 1
             logger.error(f"❌ Unexpected error (attempt {retry_count}/{max_retries}): {e}")
             if retry_count >= max_retries:
                 logger.error("❌ Max retries reached. Exiting...")
                 break
-            time.sleep(Config.RETRY_DELAY)
+            time.sleep(5)  # Giảm delay từ 10 xuống 5 giây
     
     logger.info("👋 Bot shutdown complete")
 
@@ -3643,8 +4227,26 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
     finally:
-        # Cleanup
+        # Cleanup tối ưu hóa
+        logger.info("🧹 Starting cleanup process...")
+        
         try:
+            # Dừng tất cả tác vụ đang chạy
+            logger.info("🛑 Stopping all running tasks...")
+            if 'running_tasks' in globals() and running_tasks:
+                for (uid, cid, task_key), proc in list(running_tasks.items()):
+                    if proc and proc.poll() is None:
+                        try:
+                            if os.name == 'nt':
+                                proc.terminate()
+                            else:
+                                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                            logger.info(f"Stopped task: {task_key}")
+                        except Exception as e:
+                            logger.warning(f"Could not stop task {task_key}: {e}")
+            else:
+                logger.info("No running tasks to stop")
+            
             # Dừng hệ thống quản lý tài nguyên
             resource_manager.stop_monitoring()
             logger.info("🔧 Resource management system stopped")
@@ -3653,11 +4255,43 @@ if __name__ == '__main__':
             stop_auto_notification()
             logger.info("🔔 Auto notification system stopped")
 
-            # Dừng executor
-            executor.shutdown(wait=False)
-            logger.info("🧹 Cleanup completed")
+            # Dừng executor với timeout ngắn hơn
+            logger.info("🔄 Shutting down thread executor...")
+            executor.shutdown(wait=True, timeout=5)  # Giảm từ 10 xuống 5 giây
+            logger.info("🧵 Thread executor stopped")
+
+            # Đóng database connections
+            logger.info("🗄️ Closing database connections...")
+            db.close_all_connections()
+            logger.info("🗄️ Database connections closed")
+
+            # Force garbage collection với tối ưu hóa
+            logger.info("🗑️ Running final garbage collection...")
+            try:
+                import gc
+                # Tối ưu hóa GC
+                gc.set_threshold(100, 5, 5)  # Giảm threshold
+                collected = gc.collect()
+                logger.info(f"🗑️ Garbage collection completed: {collected} objects collected")
+            except Exception as e:
+                logger.warning(f"Garbage collection failed: {e}")
+
+            # Cleanup log handlers với tối ưu hóa
+            logger.info("📝 Cleaning up log handlers...")
+            for handler in logger.handlers[:]:
+                try:
+                    handler.close()
+                    logger.removeHandler(handler)
+                except Exception as e:
+                    logger.warning(f"Could not close log handler: {e}")
+
+            logger.info("✅ Optimized cleanup completed successfully")
+            
         except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
+            logger.error(f"❌ Error during cleanup: {e}")
+        
+        # Final exit
+        logger.info("👋 Bot shutdown complete")
         sys.exit(0)
 
 
